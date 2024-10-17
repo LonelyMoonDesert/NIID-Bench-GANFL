@@ -34,6 +34,7 @@ def get_args():
     parser.add_argument('--n_parties', type=int, default=2,  help='number of workers in a distributed cluster')
     parser.add_argument('--alg', type=str, default='fedavg',
                             help='fl algorithms: fedavg/fedprox/scaffold/fednova/moon')
+    parser.add_argument('--training_type', type=str, default='local', help='local/adversarial')
     parser.add_argument('--use_projection_head', type=bool, default=False, help='whether add an additional header to model or not (see MOON)')
     parser.add_argument('--out_dim', type=int, default=256, help='the output dimension for the projection layer')
     parser.add_argument('--loss', type=str, default='contrastive', help='for moon')
@@ -76,6 +77,7 @@ def init_nets(net_configs, dropout_p, n_parties, args):
         n_classes = 47
     elif args.dataset in {'a9a', 'covtype', 'rcv1', 'SUSY'}:
         n_classes = 2
+
     if args.use_projection_head:
         add = ""
         if "mnist" in args.dataset and args.model == "simple-cnn":
@@ -115,11 +117,14 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                     net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
                 elif args.model == "vgg":
                     net = vgg11()
+                    hook_handle = net.features[20].register_forward_hook(hook_fn)
                 elif args.model == "simple-cnn":
                     if args.dataset in ("cifar10", "cinic10", "svhn"):
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=10)
+
                     elif args.dataset in ("mnist", 'femnist', 'fmnist'):
                         net = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
+                        hook_handle = net.conv2.register_forward_hook(hook_fn)
                     elif args.dataset == 'celeba':
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=2)
                 elif args.model == "vgg-9":
@@ -132,6 +137,10 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                         net = ModerateCNN(output_dim=2)
                 elif args.model == "resnet":
                     net = ResNet50_cifar10()
+                    hook_handle = net.layer3.register_forward_hook(hook_fn_reduce_feature_map)
+                elif args.model == "resnet18":
+                    net = ResNet18_cifar10()
+                    hook_handle = net.layer3.register_forward_hook(hook_fn_reduce_feature_map)
                 elif args.model == "vgg16":
                     net = vgg16()
                 else:
@@ -159,8 +168,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     if args_optimizer == 'adam':
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg,
-                               amsgrad=True)
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
     elif args_optimizer == 'sgd':
         optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
     criterion = nn.CrossEntropyLoss().to(device)
@@ -171,8 +179,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     else:
         train_dataloader = [train_dataloader]
 
-    #writer = SummaryWriter()
-
+    G_output_list = None
     for epoch in range(epochs):
         epoch_loss_collector = []
         for tmp in train_dataloader:
@@ -185,8 +192,17 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
                 target = target.long()
 
                 out = net(x)
-                loss = criterion(out, target)
 
+                # 在最后一个 epoch 记录下 G_output
+                if epoch == epochs - 1:
+                    # feature_map = feature_map.cpu()  # Ensure feature_map is on CPU
+                    if G_output_list is None:
+                        G_output_list = feature_map  # Initialize with the first feature map
+                    else:
+                        # Concatenate along the batch dimension
+                        G_output_list = torch.cat((G_output_list, feature_map), dim=0)
+
+                loss = criterion(out, target)
                 loss.backward()
                 optimizer.step()
 
@@ -196,19 +212,237 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
         epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
         logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
 
-        #train_acc = compute_accuracy(net, train_dataloader, device=device)
-        #test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+    logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
 
-        #writer.add_scalar('Accuracy/train', train_acc, epoch)
-        #writer.add_scalar('Accuracy/test', test_acc, epoch)
+    train_acc = compute_accuracy(net, train_dataloader, device=device)
+    test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
 
-        # if epoch % 10 == 0:
-        #     logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
-        #     train_acc = compute_accuracy(net, train_dataloader, device=device)
-        #     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
-        #
-        #     logger.info('>> Training accuracy: %f' % train_acc)
-        #     logger.info('>> Test accuracy: %f' % test_acc)
+    logger.info('>> Training accuracy: %f' % train_acc)
+    logger.info('>> Test accuracy: %f' % test_acc)
+
+    net.to('cpu')
+    logger.info(' ** Training complete **')
+    return train_acc, test_acc, G_output_list
+
+# 定义对抗训练的函数，用于在客户端上更新生成器
+# nets: 客户端模型列表
+# d_model: 判别器模型
+# lambda_adv: 调节系数，用于平衡任务损失和对抗损失
+# args: 其他参数（例如学习率等）
+# net_dataidx_map: 数据索引映射
+# train_dl: 本地训练数据加载器
+# device: 设备（例如 "cpu" 或 "cuda"）
+# def adv_train_net(nets, D, lambda_adv, args, net_dataidx_map, train_dl, test_dl, device="cpu"):
+#     logger.info('Starting adversarial training of clients...')
+#     criterion_task = nn.CrossEntropyLoss().to(device)
+#     criterion_adv = nn.BCELoss().to(device)
+#
+#     for net_id, net in nets.items():
+#         logger.info(f"Adversarial training for client {net_id}")
+#
+#         net.to(device)
+#         net.train()
+#
+#         # 初始化优化器
+#         if args.optimizer == 'adam':
+#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg)
+#         elif args.optimizer == 'amsgrad':
+#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg, amsgrad=True)
+#         elif args.optimizer == 'sgd':
+#             optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, momentum=args.rho, weight_decay=args.reg)
+#
+#         # print(train_dl) # []
+#         # print(len(train_dl))    # 0
+#         for epoch in range(args.epochs):
+#             epoch_loss_collector = []
+#             for batch_idx, (inputs, targets) in enumerate(train_dl[net_id]):
+#                 inputs, targets = inputs.to(device), targets.to(device)
+#
+#                 optimizer.zero_grad()
+#                 inputs.requires_grad = True
+#                 targets.requires_grad = False
+#                 targets = targets.long()
+#
+#                 # 前向传播
+#                 outputs = net(inputs)
+#                 D_outputs = D(inputs)
+#
+#                 # 任务损失 (L_task)
+#                 task_loss = criterion_task(outputs, targets)
+#
+#                 # 对抗损失 (L_adv)
+#                 adv_loss = criterion_adv(feature_map, D_outputs)
+#                 logger.info('>> adv_loss: {}'.format(adv_loss))
+#
+#                 # 总损失：任务损失 + 对抗损失
+#                 total_loss = task_loss + lambda_adv * adv_loss
+#
+#                 # 反向传播并更新生成器参数
+#                 total_loss.backward()
+#                 optimizer.step()
+#
+#                 epoch_loss_collector.append(total_loss.item())
+#
+#             epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+#             logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+#
+#         # 计算训练和测试准确率
+#         train_acc = compute_accuracy(net, train_dl[net_id], device=device)
+#         test_acc, conf_matrix = compute_accuracy(net, test_dl, get_confusion_matrix=True, device=device)
+#
+#         logger.info('>> Training accuracy: %f' % train_acc)
+#         logger.info('>> Test accuracy: %f' % test_acc)
+#
+#         # 将模型移回 CPU，节省 GPU 内存
+#         net.to("cpu")
+#     logger.info('Adversarial training complete.')
+#
+#     return train_acc, test_acc
+
+# def adv_train_net(nets, D, lambda_adv, args, net_dataidx_map, train_dl, test_dl, device="cpu"):
+#     logger.info('Starting adversarial training of clients...')
+#     criterion_task = nn.CrossEntropyLoss().to(device)
+#     criterion_adv = nn.BCELoss().to(device)
+#
+#     for net_id, net in nets.items():
+#         logger.info(f"Adversarial training for client {net_id}")
+#
+#         net.to(device)
+#         net.train()
+#
+#         # 初始化优化器
+#         if args.optimizer == 'adam':
+#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg)
+#         elif args.optimizer == 'amsgrad':
+#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg, amsgrad=True)
+#         elif args.optimizer == 'sgd':
+#             optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, momentum=args.rho, weight_decay=args.reg)
+#
+#         # 确保train_dl是列表形式，与train_net中的处理方式一致
+#         local_train_dl = train_dl[net_id]
+#         if not isinstance(local_train_dl, list):
+#             local_train_dl = [local_train_dl]
+#
+#         for epoch in range(args.epochs):
+#             epoch_loss_collector = []
+#             for batch in local_train_dl:
+#                 for batch_idx, (inputs, targets) in enumerate(batch):
+#                     inputs, targets = inputs.to(device), targets.to(device)
+#
+#                     optimizer.zero_grad()
+#                     inputs.requires_grad = True
+#                     targets.requires_grad = False
+#                     targets = targets.long()
+#
+#                     # 前向传播
+#                     outputs = net(inputs)
+#                     D_outputs = D(inputs)
+#
+#                     # 任务损失 (L_task)
+#                     task_loss = criterion_task(outputs, targets)
+#
+#                     # 对抗损失 (L_adv)
+#                     adv_loss = criterion_adv(outputs, D_outputs)
+#                     logger.info('>> adv_loss: {}'.format(adv_loss))
+#
+#                     # 总损失：任务损失 + 对抗损失
+#                     total_loss = task_loss + lambda_adv * adv_loss
+#
+#                     # 反向传播并更新生成器参数
+#                     total_loss.backward()
+#                     optimizer.step()
+#
+#                     epoch_loss_collector.append(total_loss.item())
+#
+#             epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+#             logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+#
+#         # 计算训练和测试准确率
+#         train_acc = compute_accuracy(net, local_train_dl, device=device)
+#         test_acc, conf_matrix = compute_accuracy(net, test_dl, get_confusion_matrix=True, device=device)
+#
+#         logger.info('>> Training accuracy: %f' % train_acc)
+#         logger.info('>> Test accuracy: %f' % test_acc)
+#
+#         # 将模型移回 CPU，节省 GPU 内存
+#         net.to("cpu")
+#     logger.info('Adversarial training complete.')
+#
+#     return train_acc, test_acc
+
+def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+    logger.info('Starting adversarial training of clients...')
+    criterion_task = nn.CrossEntropyLoss().to(device)
+    criterion_adv = nn.BCELoss().to(device)
+
+    train_acc = compute_accuracy(net, train_dataloader, device=device)
+    test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+
+    logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
+    logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
+
+    if args_optimizer == 'adam':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+    elif args_optimizer == 'amsgrad':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+    elif args_optimizer == 'sgd':
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+
+    cnt = 0
+    if type(train_dataloader) == type([1]):
+        pass
+    else:
+        train_dataloader = [train_dataloader]
+
+    # G_output_list = None
+    for epoch in range(epochs):
+        epoch_loss_collector = []
+        for tmp in train_dataloader:
+            for batch_idx, (x, target) in enumerate(tmp):
+                x, target = x.to(device), target.to(device)
+
+                optimizer.zero_grad()
+                x.requires_grad = True
+                target.requires_grad = False
+                target = target.long()
+
+                # 构建数据标签
+                fake_labels = torch.zeros((x.shape[0]), 1).to(device)
+
+                out = net(x)
+                D_out = D(feature_map).unsqueeze(1)
+
+                # print('D_out.shape: {}'.format(D_out.shape))
+                # print('fake_labels.shape: {}'.format(fake_labels.shape))
+
+                # 任务损失 (L_task)
+                task_loss = criterion_task(out, target)
+
+                # 对抗损失 (L_adv)
+                adv_loss = criterion_adv(D_out, fake_labels)
+                logger.info('>> adv_loss: {}'.format(adv_loss))
+                logger.info('>> task_loss: {}'.format(task_loss))
+
+                # # 在最后一个 epoch 记录下 G_output
+                # if epoch == epochs - 1:
+                #     # feature_map = feature_map.cpu()  # Ensure feature_map is on CPU
+                #     if G_output_list is None:
+                #         G_output_list = feature_map  # Initialize with the first feature map
+                #     else:
+                #         # Concatenate along the batch dimension
+                #         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
+
+                loss = task_loss + lambda_adv * adv_loss
+                loss.backward()
+                optimizer.step()
+
+                cnt += 1
+                epoch_loss_collector.append(loss.item())
+
+        epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+        logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+
+    # logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
@@ -219,7 +453,6 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     net.to('cpu')
     logger.info(' ** Training complete **')
     return train_acc, test_acc
-
 
 
 def train_net_fedprox(net_id, net, global_net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, mu, device="cpu"):
@@ -560,10 +793,121 @@ def view_image(train_dataloader):
         print(x.shape)
         exit(0)
 
+feature_map = None
+# 定义 hook 函数
+def hook_fn(module, input, output):
+    global feature_map
+    feature_map = output  # 将中间输出存储到全局变量中
 
-def local_train_net(nets, selected, args, net_dataidx_map, test_dl = None, device="cpu"):
+def hook_fn_to_2d(module, input, output):
+    global feature_map
+    # 全局平均池化
+    pooled_output = nn.functional.adaptive_avg_pool2d(output, (1, 1))
+    # 展平为二维，形状为 (batch_size, channels)
+    flattened_output = pooled_output.view(output.size(0), -1)
+    # 使用线性层降维，将通道数从 256 降到 2
+    linear = nn.Linear(256, 2).to(output.device)
+    feature_map = linear(flattened_output)
+
+# 定义 hook 函数，进行特征图降维
+def hook_fn_reduce_feature_map(module, input, output):
+    global feature_map
+    # 使用卷积降维，将通道数从 256 降到 m，空间维度从 (8, 8) 到 (n, n)
+    m, n = 64, 4  # 可以根据需要调整 m 和 n 的值
+    # 卷积层用于减少通道数
+    conv = nn.Conv2d(in_channels=256, out_channels=m, kernel_size=3, stride=2, padding=1).to(output.device)
+    reduced_output = conv(output)
+    # 使用自适应平均池化调整空间维度为 (n, n)
+    reduced_output = nn.functional.adaptive_avg_pool2d(reduced_output, (n, n))
+    feature_map = reduced_output
+
+
+def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
+    client_tensors = {}
+    start_idx = 0
+
+    # 遍历每个客户端的索引，依据样本数量来进行划分
+    for net_id, dataidxs in net_dataidx_map.items():
+        n_samples = len(dataidxs)
+        end_idx = start_idx + n_samples
+
+        # 按照样本数量划分 G_output_list_all_clients
+        client_tensors[net_id] = G_output_list_all_clients[start_idx:end_idx]
+
+        # 更新下一个客户端的起始索引
+        start_idx = end_idx
+
+    return client_tensors
+
+
+# 新增的判别器训练函数
+def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, epochs=5, batch_size=64):
+    D.train()  # Ensure discriminator is in training mode
+    criterion = nn.BCELoss()  # Binary cross-entropy loss
+    optimizer = optim.Adam(D.parameters(), lr=0.01)  # Adam optimizer
+
+    # Merge real_data and fake_data into one dataset
+    client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
+    fake_data = torch.cat([tensor for _, tensor in client_tensors.items()], dim=0).to(device)
+    real_data = real_data.to(device)
+
+    # Create labels
+    fake_labels = torch.zeros(len(fake_data), 1).to(device)
+    real_labels = torch.ones(len(real_data), 1).to(device)
+
+    # Concatenate data and labels
+    inputs = torch.cat([fake_data, real_data], dim=0)
+    targets = torch.cat([fake_labels, real_labels], dim=0)
+
+    # Create dataset and data loader
+    dataset = torch.utils.data.TensorDataset(inputs, targets)
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for batch_idx, (inputs_batch, targets_batch) in enumerate(data_loader):
+            inputs_batch, targets_batch = inputs_batch.to(device), targets_batch.to(device)
+            inputs_batch = inputs_batch.clone().detach().requires_grad_(True)  # 创建一个叶子节点，并设置requires_grad为True
+            target_batch = targets_batch.long()
+
+            optimizer.zero_grad()
+
+            outputs = D(inputs_batch).unsqueeze(1)
+
+            loss = criterion(outputs, targets_batch)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        avg_loss = epoch_loss / len(data_loader)
+        logger.info(f'Epoch {epoch+1}/{epochs}, Discriminator Loss: {avg_loss:.4f}')
+
+    logger.info(' ** Discriminator training complete **')
+    D.eval()  # Set discriminator to evaluation mode after training
+
+
+# 定义生成真样本的函数
+def generate_real_samples(global_model, data_loader, device="cpu"):
+    global_model.eval()  # 设置为评估模式，不会更新参数
+    real_samples = []
+
+    with torch.no_grad():  # 禁用梯度计算，加快推理速度并节省内存
+        for batch_idx, (inputs, _) in enumerate(data_loader):
+            inputs = inputs.to(device)
+            # 通过全局生成器生成特征图
+            outputs = global_model(inputs)
+            real_samples.append(feature_map.cpu())
+
+    # 将所有批次的生成结果合并为一个张量
+    real_samples = torch.cat(real_samples, dim=0)
+    return real_samples
+
+
+def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl=None, device="cpu"):
     avg_acc = 0.0
 
+    G_output_list_all_clients = None
     for net_id, net in nets.items():
         if net_id not in selected:
             continue
@@ -585,8 +929,16 @@ def local_train_net(nets, selected, args, net_dataidx_map, test_dl = None, devic
         train_dl_global, test_dl_global, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32)
         n_epoch = args.epochs
 
+        if not adv:
+            trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
+            if G_output_list_all_clients is None:
+                G_output_list_all_clients = G_output_list
+            else:
+                G_output_list_all_clients = torch.cat((G_output_list_all_clients, G_output_list), dim=0)
+            logger.info('>> Shape of G_output_list_all_clients: {}'.format(G_output_list_all_clients.shape))
+        else:
+            trainacc, testacc = adv_train_net(net_id, net, D, 0.1, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
 
-        trainacc, testacc = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
         logger.info("net %d final test acc %f" % (net_id, testacc))
         avg_acc += testacc
         # saving the trained models here
@@ -598,7 +950,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, test_dl = None, devic
         logger.info("avg test acc %f" % avg_acc)
 
     nets_list = list(nets.values())
-    return nets_list
+    return nets_list, G_output_list_all_clients
 
 
 def local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map, test_dl = None, device="cpu"):
@@ -798,7 +1150,7 @@ if __name__ == '__main__':
     mkdirs(args.logdir)
     mkdirs(args.modeldir)
     if args.log_file_name is None:
-        argument_path='experiment_arguments-%s.json' % datetime.datetime.now().strftime("%Y-%m-%d-%H:%M-%S")
+        argument_path='experiment_arguments-%s.json' % datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
     else:
         argument_path=args.log_file_name+'.json'
     with open(os.path.join(args.logdir, argument_path), 'w') as f:
@@ -810,7 +1162,7 @@ if __name__ == '__main__':
         logging.root.removeHandler(handler)
 
     if args.log_file_name is None:
-        args.log_file_name = 'experiment_log-%s' % (datetime.datetime.now().strftime("%Y-%m-%d-%H:%M-%S"))
+        args.log_file_name = 'experiment_log-%s' % (datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S"))
     log_path=args.log_file_name+'.log'
     logging.basicConfig(
         filename=os.path.join(args.logdir, log_path),
@@ -867,7 +1219,15 @@ if __name__ == '__main__':
         test_all_in_ds = data.ConcatDataset(test_all_in_list)
         test_dl_global = data.DataLoader(dataset=test_all_in_ds, batch_size=32, shuffle=False)
 
-
+    # 附加D
+    # 创建判别器模型
+    D = DiscriminatorS()  #              输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+    D = D.to(device)
+    print(D)
+    # 初始化优化器和损失函数
+    d_learning_rate = 0.01
+    loss_d = nn.BCELoss()  # - [p * log(q) + (1-p) * log(1-q)]
+    optimiser_D = optim.Adam(D.parameters(), lr=d_learning_rate)
 
     if args.alg == 'fedavg':
         logger.info("Initializing nets")
@@ -896,7 +1256,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            local_train_net(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
             # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
             # update global model
@@ -920,9 +1280,50 @@ if __name__ == '__main__':
             train_acc = compute_accuracy(global_model, train_dl_global, device=device)
             test_acc, conf_matrix = compute_accuracy(global_model, test_dl_global, get_confusion_matrix=True, device=device)
 
+            logger.info('>> Global Model Train accuracy: %f' % train_acc)
+            logger.info('>> Global Model Test accuracy: %f' % test_acc)
+
+            # ================第二轮 对抗训练===========================
+
+            # 第二轮 对抗训练
+            global_model.eval()
+            real_data = generate_real_samples(global_model, train_dl_global, device=device)
+            logger.info('>> Shape of generated real samples: ' + str(real_data.shape))
+
+            # 判别器训练
+            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, epochs=5,
+                                batch_size=args.batch_size)
+
+            # 对抗训练客户端
+            # 将判别器的输出形成的loss发送到各client，让它们进行对抗训练
+            # 这里首先进了local_train_net函数中，然后再分流到执行adv_train_net函数
+            # local_train_net(nets, selected, args, net_dataidx_map, D, adv=True, test_dl=test_dl_global, device=device)
+            local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl=test_dl_global, device=device)
+
+            # 第二轮update global model
+            total_data_points = sum([len(net_dataidx_map[r]) for r in selected])
+            fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in selected]
+
+            for idx in range(len(selected)):
+                net_para = nets[selected[idx]].cpu().state_dict()
+                if idx == 0:
+                    for key in net_para:
+                        global_para[key] = net_para[key] * fed_avg_freqs[idx]
+                else:
+                    for key in net_para:
+                        global_para[key] += net_para[key] * fed_avg_freqs[idx]
+            global_model.load_state_dict(global_para)
+
+            logger.info('global n_training: %d' % len(train_dl_global))
+            logger.info('global n_test: %d' % len(test_dl_global))
+
+            global_model.to(device)
+            train_acc = compute_accuracy(global_model, train_dl_global, device=device)
+            test_acc, conf_matrix = compute_accuracy(global_model, test_dl_global, get_confusion_matrix=True, device=device)
 
             logger.info('>> Global Model Train accuracy: %f' % train_acc)
             logger.info('>> Global Model Test accuracy: %f' % test_acc)
+
 
 
     elif args.alg == 'fedprox':

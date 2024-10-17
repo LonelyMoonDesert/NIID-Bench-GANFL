@@ -684,3 +684,60 @@ class ModelFedCon_noheader(nn.Module):
         y = self.l3(h)
         return h, h, y
 
+
+# class Discriminator(nn.Module):
+#     def __init__(self, input_channels=3):
+#         super(Discriminator, self).__init__()
+#         self.main = nn.Sequential(
+#             # 输入大小为 (input_channels, 32, 32)，例如 CIFAR-10 图像大小为 32x32
+#             nn.Conv2d(input_channels, 64, kernel_size=4, stride=2, padding=1),  # 输出大小为 (64, 16, 16)
+#             nn.LeakyReLU(0.2, inplace=True),
+#
+#             nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),  # 输出大小为 (128, 8, 8)
+#             nn.BatchNorm2d(128),
+#             nn.LeakyReLU(0.2, inplace=True),
+#
+#             nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),  # 输出大小为 (256, 4, 4)
+#             nn.BatchNorm2d(256),
+#             nn.LeakyReLU(0.2, inplace=True),
+#
+#             nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),  # 输出大小为 (512, 2, 2)
+#             nn.BatchNorm2d(512),
+#             nn.LeakyReLU(0.2, inplace=True),
+#
+#             # 最后将其展平并通过全连接层
+#             nn.Conv2d(512, 1, kernel_size=2),  # 输出大小为 (1, 1, 1)
+#             nn.Sigmoid()  # 用于输出概率
+#         )
+#
+#     def forward(self, x):
+#         return self.main(x).view(-1)
+
+import torch
+
+class DiscriminatorS(nn.Module):
+    def __init__(self, input_channels=64):
+        super(DiscriminatorS, self).__init__()
+        self.main = nn.Sequential(
+            # 输入 (64, 4, 4)
+            nn.Conv2d(in_channels=input_channels, out_channels=128, kernel_size=4, stride=1, padding=0),  # 输出 (128, 1, 1)
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),  # 输出 (256, 1, 1)
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),  # 输出 (128, 1, 1)
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 保持输入与输出的一致性
+            nn.Conv2d(128, 1, kernel_size=1, stride=1, padding=0),  # 输出 (1, 1, 1)
+            nn.Sigmoid()  # 输出概率
+        )
+
+    def forward(self, x):
+        return self.main(x).view(-1)
+
+
