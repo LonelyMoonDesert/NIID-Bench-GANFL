@@ -30,7 +30,11 @@ def get_args():
     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
     parser.add_argument('--batch-size', type=int, default=64, help='input batch size for training (default: 64)')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate (default: 0.01)')
+    parser.add_argument('--lr_G', type=float, default=0.01, help='learning rate (default: 0.001)')
+    parser.add_argument('--lr_D', type=float, default=0.01, help='learning rate (default: 0.005)')
     parser.add_argument('--epochs', type=int, default=5, help='number of local epochs')
+    parser.add_argument('--epoch_G', type=int, default=5, help='number of local epochs')
+    parser.add_argument('--epoch_D', type=int, default=5, help='number of local epochs')
     parser.add_argument('--n_parties', type=int, default=2,  help='number of workers in a distributed cluster')
     parser.add_argument('--alg', type=str, default='fedavg',
                             help='fl algorithms: fedavg/fedprox/scaffold/fednova/moon')
@@ -51,6 +55,8 @@ def get_args():
     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
     parser.add_argument('--log_file_name', type=str, default=None, help='The log file name')
     parser.add_argument('--optimizer', type=str, default='sgd', help='the optimizer')
+    parser.add_argument('--optimizer_G', type=str, default='adam', help='the optimizer')
+    parser.add_argument('--optimizer_D', type=str, default='sgd', help='the optimizer')
     parser.add_argument('--mu', type=float, default=0.001, help='the mu parameter for fedprox')
     parser.add_argument('--noise', type=float, default=0, help='how much noise we add to some party')
     parser.add_argument('--noise_type', type=str, default='level', help='Different level of noise or different space of noise')
@@ -232,144 +238,6 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 # net_dataidx_map: 数据索引映射
 # train_dl: 本地训练数据加载器
 # device: 设备（例如 "cpu" 或 "cuda"）
-# def adv_train_net(nets, D, lambda_adv, args, net_dataidx_map, train_dl, test_dl, device="cpu"):
-#     logger.info('Starting adversarial training of clients...')
-#     criterion_task = nn.CrossEntropyLoss().to(device)
-#     criterion_adv = nn.BCELoss().to(device)
-#
-#     for net_id, net in nets.items():
-#         logger.info(f"Adversarial training for client {net_id}")
-#
-#         net.to(device)
-#         net.train()
-#
-#         # 初始化优化器
-#         if args.optimizer == 'adam':
-#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg)
-#         elif args.optimizer == 'amsgrad':
-#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg, amsgrad=True)
-#         elif args.optimizer == 'sgd':
-#             optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, momentum=args.rho, weight_decay=args.reg)
-#
-#         # print(train_dl) # []
-#         # print(len(train_dl))    # 0
-#         for epoch in range(args.epochs):
-#             epoch_loss_collector = []
-#             for batch_idx, (inputs, targets) in enumerate(train_dl[net_id]):
-#                 inputs, targets = inputs.to(device), targets.to(device)
-#
-#                 optimizer.zero_grad()
-#                 inputs.requires_grad = True
-#                 targets.requires_grad = False
-#                 targets = targets.long()
-#
-#                 # 前向传播
-#                 outputs = net(inputs)
-#                 D_outputs = D(inputs)
-#
-#                 # 任务损失 (L_task)
-#                 task_loss = criterion_task(outputs, targets)
-#
-#                 # 对抗损失 (L_adv)
-#                 adv_loss = criterion_adv(feature_map, D_outputs)
-#                 logger.info('>> adv_loss: {}'.format(adv_loss))
-#
-#                 # 总损失：任务损失 + 对抗损失
-#                 total_loss = task_loss + lambda_adv * adv_loss
-#
-#                 # 反向传播并更新生成器参数
-#                 total_loss.backward()
-#                 optimizer.step()
-#
-#                 epoch_loss_collector.append(total_loss.item())
-#
-#             epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-#             logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
-#
-#         # 计算训练和测试准确率
-#         train_acc = compute_accuracy(net, train_dl[net_id], device=device)
-#         test_acc, conf_matrix = compute_accuracy(net, test_dl, get_confusion_matrix=True, device=device)
-#
-#         logger.info('>> Training accuracy: %f' % train_acc)
-#         logger.info('>> Test accuracy: %f' % test_acc)
-#
-#         # 将模型移回 CPU，节省 GPU 内存
-#         net.to("cpu")
-#     logger.info('Adversarial training complete.')
-#
-#     return train_acc, test_acc
-
-# def adv_train_net(nets, D, lambda_adv, args, net_dataidx_map, train_dl, test_dl, device="cpu"):
-#     logger.info('Starting adversarial training of clients...')
-#     criterion_task = nn.CrossEntropyLoss().to(device)
-#     criterion_adv = nn.BCELoss().to(device)
-#
-#     for net_id, net in nets.items():
-#         logger.info(f"Adversarial training for client {net_id}")
-#
-#         net.to(device)
-#         net.train()
-#
-#         # 初始化优化器
-#         if args.optimizer == 'adam':
-#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg)
-#         elif args.optimizer == 'amsgrad':
-#             optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, weight_decay=args.reg, amsgrad=True)
-#         elif args.optimizer == 'sgd':
-#             optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr, momentum=args.rho, weight_decay=args.reg)
-#
-#         # 确保train_dl是列表形式，与train_net中的处理方式一致
-#         local_train_dl = train_dl[net_id]
-#         if not isinstance(local_train_dl, list):
-#             local_train_dl = [local_train_dl]
-#
-#         for epoch in range(args.epochs):
-#             epoch_loss_collector = []
-#             for batch in local_train_dl:
-#                 for batch_idx, (inputs, targets) in enumerate(batch):
-#                     inputs, targets = inputs.to(device), targets.to(device)
-#
-#                     optimizer.zero_grad()
-#                     inputs.requires_grad = True
-#                     targets.requires_grad = False
-#                     targets = targets.long()
-#
-#                     # 前向传播
-#                     outputs = net(inputs)
-#                     D_outputs = D(inputs)
-#
-#                     # 任务损失 (L_task)
-#                     task_loss = criterion_task(outputs, targets)
-#
-#                     # 对抗损失 (L_adv)
-#                     adv_loss = criterion_adv(outputs, D_outputs)
-#                     logger.info('>> adv_loss: {}'.format(adv_loss))
-#
-#                     # 总损失：任务损失 + 对抗损失
-#                     total_loss = task_loss + lambda_adv * adv_loss
-#
-#                     # 反向传播并更新生成器参数
-#                     total_loss.backward()
-#                     optimizer.step()
-#
-#                     epoch_loss_collector.append(total_loss.item())
-#
-#             epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-#             logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
-#
-#         # 计算训练和测试准确率
-#         train_acc = compute_accuracy(net, local_train_dl, device=device)
-#         test_acc, conf_matrix = compute_accuracy(net, test_dl, get_confusion_matrix=True, device=device)
-#
-#         logger.info('>> Training accuracy: %f' % train_acc)
-#         logger.info('>> Test accuracy: %f' % test_acc)
-#
-#         # 将模型移回 CPU，节省 GPU 内存
-#         net.to("cpu")
-#     logger.info('Adversarial training complete.')
-#
-#     return train_acc, test_acc
-
 def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
     logger.info('Starting adversarial training of clients...')
     criterion_task = nn.CrossEntropyLoss().to(device)
@@ -381,12 +249,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
     logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
 
+    # 初始化优化器，只对生成器部分的参数进行优化
+    # 获取生成器部分的参数（conv1 到 layer3 之前的所有层）
+    generator_parameters = []
+    G_output_list = None
+    for name, param in net.named_parameters():
+        if 'layer4' in name or 'avgpool' in name or 'fc' in name:
+            param.requires_grad = False
+        else:
+            generator_parameters.append(param)
+
+    optimizer = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+
     if args_optimizer == 'adam':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+        optimizer = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+        optimizer = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
     elif args_optimizer == 'sgd':
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+        optimizer = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
 
     cnt = 0
     if type(train_dataloader) == type([1]):
@@ -394,65 +274,70 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     else:
         train_dataloader = [train_dataloader]
 
-    # G_output_list = None
+    # 训练循环
     for epoch in range(epochs):
         epoch_loss_collector = []
+        epoch_task_loss_collector = []
+        epoch_adv_loss_collector = []
         for tmp in train_dataloader:
             for batch_idx, (x, target) in enumerate(tmp):
-                x, target = x.to(device), target.to(device)
+                x = x.to(device)
+                target = target.to(device)
 
                 optimizer.zero_grad()
                 x.requires_grad = True
                 target.requires_grad = False
                 target = target.long()
 
-                # 构建数据标签
+                # 生成伪标签
                 fake_labels = torch.zeros((x.shape[0]), 1).to(device)
 
-                out = net(x)
+                # 前向传播，计算生成器输出
+                out = net(x)  # 通过模型的前半部分
+
+                # 在最后一个 epoch 记录下 G_output
+                if epoch == epochs - 1:
+                    # feature_map = feature_map.cpu()  # Ensure feature_map is on CPU
+                    if G_output_list is None:
+                        G_output_list = feature_map  # Initialize with the first feature map
+                    else:
+                        # Concatenate along the batch dimension
+                        G_output_list = torch.cat((G_output_list, feature_map), dim=0)
+
+                # 获取生成器的中间特征图 (通过 hook 获得 feature_map)
                 D_out = D(feature_map).unsqueeze(1)
 
-                # print('D_out.shape: {}'.format(D_out.shape))
-                # print('fake_labels.shape: {}'.format(fake_labels.shape))
-
-                # 任务损失 (L_task)
+                # 计算任务损失和对抗损失
                 task_loss = criterion_task(out, target)
-
-                # 对抗损失 (L_adv)
                 adv_loss = criterion_adv(D_out, fake_labels)
-                logger.info('>> adv_loss: {}'.format(adv_loss))
-                logger.info('>> task_loss: {}'.format(task_loss))
 
-                # # 在最后一个 epoch 记录下 G_output
-                # if epoch == epochs - 1:
-                #     # feature_map = feature_map.cpu()  # Ensure feature_map is on CPU
-                #     if G_output_list is None:
-                #         G_output_list = feature_map  # Initialize with the first feature map
-                #     else:
-                #         # Concatenate along the batch dimension
-                #         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
-
-                loss = task_loss + lambda_adv * adv_loss
+                # 计算总损失
+                loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
+                # loss = 10 * adv_loss
                 loss.backward()
+
+                # 更新生成器参数
                 optimizer.step()
 
-                cnt += 1
                 epoch_loss_collector.append(loss.item())
+                epoch_task_loss_collector.append(task_loss.item())
+                epoch_adv_loss_collector.append(adv_loss.item())
 
-        epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-        logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
-
-    # logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
+        # 记录每个epoch最后一个batch的损失
+        logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f' % (epoch, epoch_loss_collector[-1], epoch_task_loss_collector[-1], epoch_adv_loss_collector[-1]))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+
+    logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
 
     logger.info('>> Training accuracy: %f' % train_acc)
     logger.info('>> Test accuracy: %f' % test_acc)
 
     net.to('cpu')
     logger.info(' ** Training complete **')
-    return train_acc, test_acc
+    return train_acc, test_acc, G_output_list
+
 
 
 def train_net_fedprox(net_id, net, global_net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, mu, device="cpu"):
@@ -841,19 +726,27 @@ def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
 
 
 # 新增的判别器训练函数
-def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, epochs=5, batch_size=64):
+def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args_optimizer, lr, epochs=5, batch_size=64):
     D.train()  # Ensure discriminator is in training mode
     criterion = nn.BCELoss()  # Binary cross-entropy loss
-    optimizer = optim.Adam(D.parameters(), lr=0.01)  # Adam optimizer
+
+    optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
+                          weight_decay=args.reg)
+    if args_optimizer == 'adam':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+    elif args_optimizer == 'amsgrad':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+    elif args_optimizer == 'sgd':
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
 
     # Merge real_data and fake_data into one dataset
     client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
     fake_data = torch.cat([tensor for _, tensor in client_tensors.items()], dim=0).to(device)
     real_data = real_data.to(device)
 
-    # Create labels
-    fake_labels = torch.zeros(len(fake_data), 1).to(device)
-    real_labels = torch.ones(len(real_data), 1).to(device)
+    # Create labels with label smoothing
+    fake_labels = torch.full((len(fake_data), 1), 0.1).to(device)  # Fake labels smoothed to 0.1
+    real_labels = torch.full((len(real_data), 1), 0.9).to(device)  # Real labels smoothed to 0.9
 
     # Concatenate data and labels
     inputs = torch.cat([fake_data, real_data], dim=0)
@@ -868,7 +761,7 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
         for batch_idx, (inputs_batch, targets_batch) in enumerate(data_loader):
             inputs_batch, targets_batch = inputs_batch.to(device), targets_batch.to(device)
             inputs_batch = inputs_batch.clone().detach().requires_grad_(True)  # 创建一个叶子节点，并设置requires_grad为True
-            target_batch = targets_batch.long()
+            target_batch = targets_batch.float()
 
             optimizer.zero_grad()
 
@@ -931,13 +824,14 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
 
         if not adv:
             trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
-            if G_output_list_all_clients is None:
-                G_output_list_all_clients = G_output_list
-            else:
-                G_output_list_all_clients = torch.cat((G_output_list_all_clients, G_output_list), dim=0)
-            logger.info('>> Shape of G_output_list_all_clients: {}'.format(G_output_list_all_clients.shape))
         else:
-            trainacc, testacc = adv_train_net(net_id, net, D, 0.1, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
+            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, 0.2, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, device=device)
+
+        if G_output_list_all_clients is None:
+            G_output_list_all_clients = G_output_list
+        else:
+            G_output_list_all_clients = torch.cat((G_output_list_all_clients, G_output_list), dim=0)
+        logger.info('>> Shape of G_output_list_all_clients: {}'.format(G_output_list_all_clients.shape))
 
         logger.info("net %d final test acc %f" % (net_id, testacc))
         avg_acc += testacc
@@ -1172,6 +1066,7 @@ if __name__ == '__main__':
 
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
+    logger.info(str(args))
     logger.info(device)
 
     seed = args.init_seed
@@ -1256,7 +1151,10 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
+            if round == 0:
+                _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
+            else:
+                _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = True, test_dl = test_dl_global, device=device)
             # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
             # update global model
@@ -1285,20 +1183,29 @@ if __name__ == '__main__':
 
             # ================第二轮 对抗训练===========================
 
+            global_para = global_model.state_dict()
+            if round == 0:
+                if args.is_same_initial:
+                    for idx in selected:
+                        nets[idx].load_state_dict(global_para)
+            else:
+                for idx in selected:
+                    nets[idx].load_state_dict(global_para)
+
             # 第二轮 对抗训练
             global_model.eval()
             real_data = generate_real_samples(global_model, train_dl_global, device=device)
             logger.info('>> Shape of generated real samples: ' + str(real_data.shape))
 
             # 判别器训练
-            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, epochs=5,
+            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args.optimizer_D, args.lr_D, args.epoch_D,
                                 batch_size=args.batch_size)
 
             # 对抗训练客户端
             # 将判别器的输出形成的loss发送到各client，让它们进行对抗训练
             # 这里首先进了local_train_net函数中，然后再分流到执行adv_train_net函数
             # local_train_net(nets, selected, args, net_dataidx_map, D, adv=True, test_dl=test_dl_global, device=device)
-            local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl=test_dl_global, device=device)
+            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv=True, test_dl=test_dl_global, device=device)
 
             # 第二轮update global model
             total_data_points = sum([len(net_dataidx_map[r]) for r in selected])

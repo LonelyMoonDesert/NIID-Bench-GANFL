@@ -142,7 +142,7 @@ class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None):
+                 base_width=64, dilation=1, norm_layer=None, dropout_rate=0.3):
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -156,6 +156,8 @@ class BasicBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
+        # 添加dropout 防止训练过拟合
+        self.dropout = nn.Dropout(dropout_rate)
         self.downsample = downsample
         self.stride = stride
 
@@ -168,6 +170,10 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
+
+        # 增加了两条forward
+        out = self.relu(out)
+        out = self.dropout(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
@@ -188,7 +194,7 @@ class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None):
+                 base_width=64, dilation=1, norm_layer=None, dropout_rate=0.5):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -201,6 +207,8 @@ class Bottleneck(nn.Module):
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
         self.relu = nn.ReLU(inplace=True)
+        # 增加dropout层
+        self.dropout = nn.Dropout(dropout_rate)
         self.downsample = downsample
         self.stride = stride
 
@@ -217,6 +225,8 @@ class Bottleneck(nn.Module):
 
         out = self.conv3(out)
         out = self.bn3(out)
+        out = self.relu(out)
+        out = self.dropout(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
