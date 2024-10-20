@@ -730,14 +730,13 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
     D.train()  # Ensure discriminator is in training mode
     criterion = nn.BCELoss()  # Binary cross-entropy loss
 
-    optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
-                          weight_decay=args.reg)
+    optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
     if args_optimizer == 'adam':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+        optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+        optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg, amsgrad=True)
     elif args_optimizer == 'sgd':
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+        optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
 
     # Merge real_data and fake_data into one dataset
     client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
@@ -779,6 +778,25 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
     logger.info(' ** Discriminator training complete **')
     D.eval()  # Set discriminator to evaluation mode after training
 
+
+def update_client_task_layers(global_model, client_models):
+    # 提取全局模型的状态字典
+    global_state_dict = global_model.state_dict()
+
+    # 定义任务相关层的前缀
+    task_layers_prefixes = ['layer4', 'fc']  # 假设'fc'是最后的全连接层
+
+    # 更新每个客户端模型
+    for client_model in client_models.values():
+        client_state_dict = client_model.state_dict()
+
+        # 遍历全局模型的参数，更新任务相关层
+        for key, value in global_state_dict.items():
+            if any(key.startswith(prefix) for prefix in task_layers_prefixes):
+                client_state_dict[key] = value
+
+        # 加载更新后的状态字典到客户端模型
+        client_model.load_state_dict(client_state_dict, strict=False)
 
 # 定义生成真样本的函数
 def generate_real_samples(global_model, data_loader, device="cpu"):
@@ -1151,11 +1169,13 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            if round == 0:
-                _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
-            else:
-                _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = True, test_dl = test_dl_global, device=device)
-            # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
+            # if round == 0:
+            #     _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
+            # else:
+            #     _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = True, test_dl = test_dl_global, device=device)
+            # # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
+
+            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
 
             # update global model
             total_data_points = sum([len(net_dataidx_map[r]) for r in selected])
@@ -1183,14 +1203,15 @@ if __name__ == '__main__':
 
             # ================第二轮 对抗训练===========================
 
-            global_para = global_model.state_dict()
-            if round == 0:
-                if args.is_same_initial:
-                    for idx in selected:
-                        nets[idx].load_state_dict(global_para)
-            else:
-                for idx in selected:
-                    nets[idx].load_state_dict(global_para)
+            # global_para = global_model.state_dict()
+            # if round == 0:
+            #     if args.is_same_initial:
+            #         for idx in selected:
+            #             nets[idx].load_state_dict(global_para)
+            # else:
+            #     for idx in selected:
+            #         nets[idx].load_state_dict(global_para)
+            update_client_task_layers(global_model, nets)
 
             # 第二轮 对抗训练
             global_model.eval()
