@@ -49,6 +49,7 @@ def get_args():
     parser.add_argument('--dropout_p', type=float, required=False, default=0.0, help="Dropout probability. Default=0.0")
     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
     parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
+    parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
     parser.add_argument('--beta', type=float, default=0.5, help='The parameter for the dirichlet distribution for data partitioning')
@@ -287,10 +288,12 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 optimizer.zero_grad()
                 x.requires_grad = True
                 target.requires_grad = False
-                target = target.long()
+                target = target.long().view(-1)
 
                 # 生成伪标签
-                fake_labels = torch.zeros((x.shape[0]), 1).to(device)
+                # fake_labels = torch.zeros((x.shape[0]), 1).to(device).view(-1)
+                fake_labels = torch.full((x.shape[0],), 0.1, device=device)
+                real_labels = torch.full((x.shape[0],), 0.9, device=device)
 
                 # 前向传播，计算生成器输出
                 out = net(x)  # 通过模型的前半部分
@@ -305,11 +308,14 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
 
                 # 获取生成器的中间特征图 (通过 hook 获得 feature_map)
-                D_out = D(feature_map).unsqueeze(1)
+                D_out = D(feature_map).squeeze()
+                # print('D_out: {}'.format(D_out))
+                # print('fake_labels: {}'.format(fake_labels))
 
                 # 计算任务损失和对抗损失
                 task_loss = criterion_task(out, target)
-                adv_loss = criterion_adv(D_out, fake_labels)
+                # adv_loss = criterion_adv(D_out, fake_labels)
+                adv_loss = criterion_adv(D_out, real_labels)
 
                 # 计算总损失
                 loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
@@ -337,6 +343,9 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     net.to('cpu')
     logger.info(' ** Training complete **')
     return train_acc, test_acc, G_output_list
+
+
+
 
 def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
     logger.info('Training network %s' % str(net_id))
@@ -797,8 +806,7 @@ def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
 
 
 # 新增的判别器训练函数
-def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args_optimizer, lr, epochs=5,
-                        batch_size=64):
+def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args_optimizer, lr, epochs=5, batch_size=64):
     D.train()  # 确保判别器处于训练模式
     criterion = nn.BCELoss()  # 二元交叉熵损失
 
@@ -813,25 +821,28 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
         optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
 
     # 准备假数据和真实数据
-    client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
-    fake_data = torch.cat([tensor for _, tensor in client_tensors.items()], dim=0)
-    real_data = real_data
+    # client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
+    # fake_data = torch.cat([tensor for _, tensor in client_tensors.items()], dim=0).to(device)  # 将假数据迁移到指定设备
+    fake_data = G_output_list_all_clients.to(device)
+    real_data = real_data.to(device)  # 将真实数据迁移到指定设备
 
-    # 创建数据加载器
-    fake_dataset = torch.utils.data.TensorDataset(fake_data, torch.zeros(len(fake_data)))  # 假数据标签为0
-    real_dataset = torch.utils.data.TensorDataset(real_data, torch.ones(len(real_data)))  # 真实数据标签为1
+    # 创建数据加载器，应用标签平滑
+    fake_dataset = torch.utils.data.TensorDataset(fake_data, torch.full((len(fake_data),), 0.1).to(device))  # 假数据标签为0.1，并迁移到设备
+    real_dataset = torch.utils.data.TensorDataset(real_data, torch.full((len(real_data),), 0.9).to(device))   # 真实数据标签为0.9，并迁移到设备
 
     # 合并数据集
     combined_dataset = torch.utils.data.ConcatDataset([fake_dataset, real_dataset])
-    data_loader = torch.utils.data.DataLoader(combined_dataset, batch_size=batch_size, shuffle=True)
+    data_loader = torch.utils.data.DataLoader(combined_dataset, batch_size=batch_size, shuffle=False)
+    fake_data_loader = torch.utils.data.DataLoader(fake_dataset, batch_size=batch_size, shuffle=True)
+    real_data_loader = torch.utils.data.DataLoader(real_dataset, batch_size=batch_size, shuffle=True)
 
     for epoch in range(epochs):
         epoch_loss = 0.0
         correct = 0
         total = 0
-        for batch_idx, (inputs_batch, targets_batch) in enumerate(data_loader):
+        for batch_idx, (inputs_batch, targets_batch) in enumerate(fake_data_loader):
             inputs_batch, targets_batch = inputs_batch.to(device), targets_batch.to(device)
-
+            inputs_batch = inputs_batch.clone().detach().requires_grad_(True)  # 创建一个叶子节点，并设置requires_grad为True
             # 确保targets_batch的形状与outputs匹配，调整为 [batch_size]
             targets_batch = targets_batch.view(-1)  # 将targets_batch调整为一维张量
 
@@ -839,17 +850,47 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
 
             outputs = D(inputs_batch)
             outputs = outputs.squeeze()  # 确保outputs为 [batch_size] 形状
-            loss = criterion(outputs, targets_batch)
+            fake_loss = criterion(outputs, targets_batch)
 
-            loss.backward()
+            # print('outputs: ', outputs)
+            # print('targets: ', targets_batch)
+
+            fake_loss.backward()
             optimizer.step()
 
-            epoch_loss += loss.item()
+            epoch_loss += fake_loss.item()
 
             # 计算准确率
             predicted = (outputs >= 0.5).float()
+            # print('predicted: ', predicted)
             total += targets_batch.size(0)
-            correct += (predicted == targets_batch).sum().item()
+            correct += torch.isclose(predicted, targets_batch, atol=0.1).sum().item()
+
+        for batch_idx, (inputs_batch, targets_batch) in enumerate(real_data_loader):
+            inputs_batch, targets_batch = inputs_batch.to(device), targets_batch.to(device)
+            inputs_batch = inputs_batch.clone().detach().requires_grad_(True)  # 创建一个叶子节点，并设置requires_grad为True
+            # 确保targets_batch的形状与outputs匹配，调整为 [batch_size]
+            targets_batch = targets_batch.view(-1)  # 将targets_batch调整为一维张量
+
+            optimizer.zero_grad()
+
+            outputs = D(inputs_batch)
+            outputs = outputs.squeeze()  # 确保outputs为 [batch_size] 形状
+            real_loss = criterion(outputs, targets_batch)
+
+            # print('outputs: ', outputs)
+            # print('targets: ', targets_batch)
+
+            real_loss.backward()
+            optimizer.step()
+
+            epoch_loss += real_loss.item()
+
+            # 计算准确率
+            predicted = (outputs >= 0.5).float()
+            # print('predicted: ', predicted)
+            total += targets_batch.size(0)
+            correct += torch.isclose(predicted, targets_batch, atol=0.1).sum().item()
 
         avg_loss = epoch_loss / len(data_loader)
         accuracy = 100 * correct / total
@@ -857,6 +898,66 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
 
     logger.info(' ** Discriminator training complete **')
     D.eval()  # 训练结束后将判别器设置为评估模式
+
+def get_feature_maps(nets, selected, args, net_dataidx_map, test_dl=None, device="cpu"):
+    global feature_map  # 声明为全局变量
+    G_output_list_all_clients = None
+
+    for net_id, net in nets.items():
+        if net_id not in selected:
+            continue
+        dataidxs = net_dataidx_map[net_id]
+
+        logger.info("Getting feature maps of network %s. n_feature_maps: %d" % (str(net_id), len(dataidxs)))
+        # move the model to cuda device:
+        net.to(device)
+
+        noise_level = args.noise
+        if net_id == args.n_parties - 1:
+            noise_level = 0
+
+        if args.noise_type == 'space':
+            train_dl_local, test_dl_local, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32, dataidxs, noise_level, net_id, args.n_parties-1)
+        else:
+            noise_level = args.noise / (args.n_parties - 1) * net_id
+            train_dl_local, test_dl_local, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32, dataidxs, noise_level)
+
+        G_output_list = []
+
+        if not isinstance(train_dl_local, list):
+            train_dl_local = [train_dl_local]
+
+        for tmp in train_dl_local:
+            for batch_idx, (x, target) in enumerate(tmp):
+                x, target = x.to(device), target.to(device)
+
+                out = net(x)
+
+                # 假设 feature_map 是 net 的某一层的输出（你可能需要使用 hook 或其他方式来获取）
+                # 将每个批次的 feature_map 转移到 CPU 以节省 GPU 内存
+                # feature_map = out.detach().cpu()
+                mid_output = feature_map
+                feature_map = mid_output.detach().cpu()
+
+                # 将 feature_map 添加到列表中，而不是在 GPU 上拼接
+                G_output_list.append(feature_map)
+
+        # 将整个客户端的特征图拼接为一个大的张量
+        G_output_list = torch.cat(G_output_list, dim=0)
+
+        logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
+
+        net.to('cpu')
+        logger.info(' ** Get feature maps complete **')
+
+        if G_output_list_all_clients is None:
+            G_output_list_all_clients = G_output_list
+        else:
+            G_output_list_all_clients = torch.cat((G_output_list_all_clients, G_output_list), dim=0)
+
+        logger.info('>> Shape of G_output_list_all_clients: {}'.format(G_output_list_all_clients.shape))
+
+    return G_output_list_all_clients
 
 
 def update_client_task_layers(global_model, client_models):
@@ -877,6 +978,53 @@ def update_client_task_layers(global_model, client_models):
 
         # 加载更新后的状态字典到客户端模型
         client_model.load_state_dict(client_state_dict, strict=False)
+
+
+def aggregate_task_layers_weighted(global_model, client_models, net_dataidx_map, selected_clients):
+    """
+    按照客户端数据比例加权聚合客户端的任务部分参数，并将结果更新到全局模型中。
+
+    参数：
+    - global_model: 全局模型
+    - client_models: 客户端模型字典，键为客户端标识，值为客户端模型
+    - net_dataidx_map: 一个字典，键为客户端标识，值为每个客户端的数据索引
+    - selected_clients: 被选中的客户端列表
+
+    返回：
+    - 无，直接更新 global_model
+    """
+    # 提取全局模型的状态字典
+    global_state_dict = global_model.state_dict()
+
+    # 定义任务相关层的前缀
+    task_layers_prefixes = ['layer4', 'fc']  # 假设 'fc' 是最后的全连接层
+
+    # 初始化聚合参数字典
+    aggregated_params = {key: torch.zeros_like(value) for key, value in global_state_dict.items() if
+                         any(key.startswith(prefix) for prefix in task_layers_prefixes)}
+
+    # 计算每个客户端的数据比例（权重）
+    total_data_points = sum([len(net_dataidx_map[client]) for client in selected_clients])
+    fed_avg_freqs = [len(net_dataidx_map[client]) / total_data_points for client in selected_clients]
+
+    # 遍历每个选中的客户端，进行加权聚合
+    for idx, client_id in enumerate(selected_clients):
+        client_model = client_models[client_id]
+        client_state_dict = client_model.state_dict()
+
+        for key in aggregated_params.keys():
+            if idx == 0:
+                # 初始化聚合参数
+                aggregated_params[key] = client_state_dict[key] * fed_avg_freqs[idx]
+            else:
+                # 加权累加
+                aggregated_params[key] += client_state_dict[key] * fed_avg_freqs[idx]
+
+    # 更新全局模型的任务层参数
+    global_state_dict.update(aggregated_params)
+    global_model.load_state_dict(global_state_dict, strict=False)
+
+    return global_model
 
 # 定义生成真样本的函数
 def generate_real_samples(global_model, data_loader, device="cpu"):
@@ -923,7 +1071,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
         if not adv:
             trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
         else:
-            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, 0.2, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, device=device)
+            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, test_dl_global, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, device=device)
 
         if G_output_list_all_clients is None:
             G_output_list_all_clients = G_output_list
@@ -1179,12 +1327,12 @@ if __name__ == '__main__':
     args = get_args()
     mkdirs(args.logdir)
     mkdirs(args.modeldir)
-    if args.log_file_name is None:
-        argument_path='experiment_arguments-%s.json' % datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    else:
-        argument_path=args.log_file_name+'.json'
-    with open(os.path.join(args.logdir, argument_path), 'w') as f:
-        json.dump(str(args), f)
+    # if args.log_file_name is None:
+    #     argument_path='experiment_arguments-%s.json' % datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    # else:
+    #     argument_path=args.log_file_name+'.json'
+    # with open(os.path.join(args.logdir, argument_path), 'w') as f:
+    #     json.dump(str(args), f)
     device = torch.device(args.device)
     # logging.basicConfig(filename='test.log', level=logger.info, filemode='w')
     # logging.info("test")
@@ -1249,6 +1397,19 @@ if __name__ == '__main__':
         train_dl_global = data.DataLoader(dataset=train_all_in_ds, batch_size=args.batch_size, shuffle=True)
         test_all_in_ds = data.ConcatDataset(test_all_in_list)
         test_dl_global = data.DataLoader(dataset=test_all_in_ds, batch_size=32, shuffle=False)
+        logger.info("Getting global dataset using ConcatDataset.")
+    else:
+        train_dl_global, test_dl_global, train_ds_global, test_ds_global = get_dataloader(args.dataset,
+                                                                                          args.datadir,
+                                                                                          args.batch_size,
+                                                                                          32)
+        logger.info("Getting global dataset using get_dataloader.")
+
+    # 现在我们强制使用比较纯净（只加了noise，我也说不清）的数据集，虽然不确定会带来什么影响……
+    train_dl_global, test_dl_global, train_ds_global, test_ds_global = get_dataloader(args.dataset,
+                                                                                      args.datadir,
+                                                                                      args.batch_size,
+                                                                                      32)
 
     # 附加D
     # 创建判别器模型
@@ -1286,6 +1447,8 @@ if __name__ == '__main__':
             else:
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
+
+            # update_client_task_layers(global_model, nets)
 
             # if round == 0:
             #     _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
@@ -1337,6 +1500,10 @@ if __name__ == '__main__':
             logger.info('>> Shape of generated real samples: ' + str(real_data.shape))
 
             # 判别器训练
+
+            # TODO: 获取feature map，把对客户端的遍历放进函数里面
+            G_output_list_all_clients = get_feature_maps(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+
             train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args.optimizer_D, args.lr_D, args.epoch_D,
                                 batch_size=args.batch_size)
 
@@ -1359,6 +1526,8 @@ if __name__ == '__main__':
                     for key in net_para:
                         global_para[key] += net_para[key] * fed_avg_freqs[idx]
             global_model.load_state_dict(global_para)
+
+            # aggregate_task_layers_weighted(global_model, nets, net_dataidx_map, selected)
 
             logger.info('global n_training: %d' % len(train_dl_global))
             logger.info('global n_test: %d' % len(test_dl_global))
