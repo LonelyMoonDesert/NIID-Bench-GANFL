@@ -287,6 +287,34 @@ class SimpleCNNMNIST(nn.Module):
         x = self.fc3(x)
         return x
 
+class SimpleCNNMNIST_drop_BN(nn.Module):
+    def __init__(self, input_dim, hidden_dims, output_dim=10, dropout_rate=0.2):
+        super(SimpleCNNMNIST_drop_BN, self).__init__()
+        self.conv1 = nn.Conv2d(1,   6, 5)
+        self.conv1_bn = nn.BatchNorm2d(6)  # 添加BN层
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.conv2_bn = nn.BatchNorm2d(16)  # 添加BN层
+
+        # for now, we hard coded this network
+        # i.e. we fix the number of hidden layers i.e. 2 layers
+        self.fc1 = nn.Linear(input_dim, hidden_dims[0])
+        self.fc1_drop = nn.Dropout(dropout_rate)  # 添加Dropout层
+        self.fc2 = nn.Linear(hidden_dims[0], hidden_dims[1])
+        self.fc2_drop = nn.Dropout(dropout_rate)  # 添加Dropout层
+        self.fc3 = nn.Linear(hidden_dims[1], output_dim)
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1_bn(self.conv1(x))))
+        x = self.pool(F.relu(self.conv2_bn(self.conv2(x))))
+        x = x.view(-1, 16 * 4 * 4)  # Flatten the output
+
+        x = F.relu(self.fc1(x))
+        x = self.fc1_drop(x)  # 应用Dropout
+        x = F.relu(self.fc2(x))
+        x = self.fc2_drop(x)  # 应用Dropout
+        x = self.fc3(x)
+        return x
 
 class SimpleCNNContainer(nn.Module):
     def __init__(self, input_channel, num_filters, kernel_size, input_dim, hidden_dims, output_dim=10):
@@ -740,4 +768,29 @@ class DiscriminatorS(nn.Module):
     def forward(self, x):
         return self.main(x).view(-1)
 
+
+class DiscriminatorS_mnist(nn.Module):
+    def __init__(self, input_channels=16):  # Adjust the default number of input channels to 16
+        super(DiscriminatorS_mnist, self).__init__()
+        self.main = nn.Sequential(
+            # Input should have shape (input_channels, 8, 8) based on your error message
+            nn.Conv2d(in_channels=input_channels, out_channels=128, kernel_size=4, stride=2, padding=1),  # Adjusted to output shape (128, 4, 4)
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),  # Adjusted to output shape (256, 2, 2)
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),  # Output shape will be (128, 2, 2)
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Flatten the output to match single value output
+            nn.Conv2d(128, 1, kernel_size=2, stride=1, padding=0),  # Adjusted to output shape (1, 1, 1)
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.main(x).view(-1)  # Flatten the output to a single dimension
 
