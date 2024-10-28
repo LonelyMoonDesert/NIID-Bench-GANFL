@@ -48,7 +48,8 @@ def get_args():
     parser.add_argument('--init_seed', type=int, default=0, help="Random seed")
     parser.add_argument('--dropout_p', type=float, required=False, default=0.0, help="Dropout probability. Default=0.0")
     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
-    parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
+    parser.add_argument('--reg', type=float, default=1e-4, help="L2 regularization strength")
+    parser.add_argument('--l1_lambda', type=float, default=1e-4, help="L1 regularization strength")
     parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
@@ -130,7 +131,8 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=10)
 
                     elif args.dataset in ("mnist", 'femnist', 'fmnist'):
-                        net = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
+                        # net = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
+                        net = SimpleCNNMNIST_drop_BN(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
                         hook_handle = net.conv2.register_forward_hook(hook_fn)
                     elif args.dataset == 'celeba':
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=2)
@@ -144,12 +146,13 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                         net = ModerateCNN(output_dim=2)
                 elif args.model == "resnet":
                     net = ResNet50_cifar10()
-                    hook_handle = net.layer3.register_forward_hook(hook_fn_reduce_feature_map)
+                    hook_handle = net.layer3.register_forward_hook(hook_fn)
                 elif args.model == "resnet18":
                     net = ResNet18_cifar10()
                     hook_handle = net.layer3.register_forward_hook(hook_fn_reduce_feature_map)
                 elif args.model == "vgg16":
                     net = vgg16()
+
                 else:
                     print("not supported yet")
                     exit(1)
@@ -176,6 +179,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+        logger.info('>> Pre-Training AMSGRAD optimizer: {}'.format(optimizer))
     elif args_optimizer == 'sgd':
         optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
     criterion = nn.CrossEntropyLoss().to(device)
@@ -209,7 +213,9 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
                         # Concatenate along the batch dimension
                         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
 
-                loss = criterion(out, target)
+                l1_norm = sum(p.abs().sum() for p in net.parameters())
+
+                loss = criterion(out, target) + args.l1_lambda * l1_norm
                 loss.backward()
                 optimizer.step()
 
@@ -760,21 +766,14 @@ def view_image(train_dataloader):
 
 feature_map = None
 # 定义 hook 函数
+
+# for simple-cnn mnist
 def hook_fn(module, input, output):
     global feature_map
     feature_map = output  # 将中间输出存储到全局变量中
 
-def hook_fn_to_2d(module, input, output):
-    global feature_map
-    # 全局平均池化
-    pooled_output = nn.functional.adaptive_avg_pool2d(output, (1, 1))
-    # 展平为二维，形状为 (batch_size, channels)
-    flattened_output = pooled_output.view(output.size(0), -1)
-    # 使用线性层降维，将通道数从 256 降到 2
-    linear = nn.Linear(256, 2).to(output.device)
-    feature_map = linear(flattened_output)
-
 # 定义 hook 函数，进行特征图降维
+# For resnet18 cifar10
 def hook_fn_reduce_feature_map(module, input, output):
     global feature_map
     # 使用卷积降维，将通道数从 256 降到 m，空间维度从 (8, 8) 到 (n, n)
@@ -1071,7 +1070,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
         if not adv:
             trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
         else:
-            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, test_dl_global, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, device=device)
+            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, device=device)
 
         if G_output_list_all_clients is None:
             G_output_list_all_clients = G_output_list
@@ -1413,13 +1412,17 @@ if __name__ == '__main__':
 
     # 附加D
     # 创建判别器模型
-    D = DiscriminatorS()  #              输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+    if args.dataset == 'mnist':
+        D = DiscriminatorS_mnist()
+    elif args.dataset == 'cifar10':
+        D = DiscriminatorS()  #              输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+
     D = D.to(device)
     print(D)
     # 初始化优化器和损失函数
     d_learning_rate = 0.01
     loss_d = nn.BCELoss()  # - [p * log(q) + (1-p) * log(1-q)]
-    optimiser_D = optim.Adam(D.parameters(), lr=d_learning_rate)
+
 
     if args.alg == 'fedgan':
         logger.info("Initializing nets")
@@ -1501,7 +1504,6 @@ if __name__ == '__main__':
 
             # 判别器训练
 
-            # TODO: 获取feature map，把对客户端的遍历放进函数里面
             G_output_list_all_clients = get_feature_maps(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, device=device)
 
             train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args.optimizer_D, args.lr_D, args.epoch_D,
