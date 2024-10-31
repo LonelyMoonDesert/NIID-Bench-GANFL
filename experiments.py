@@ -50,6 +50,7 @@ def get_args():
     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
     parser.add_argument('--reg', type=float, default=1e-4, help="L2 regularization strength")
     parser.add_argument('--l1_lambda', type=float, default=1e-4, help="L1 regularization strength")
+    parser.add_argument('--l1', type=bool, default=False, help="Use L1 regularization")
     parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
@@ -57,8 +58,8 @@ def get_args():
     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
     parser.add_argument('--log_file_name', type=str, default=None, help='The log file name')
     parser.add_argument('--optimizer', type=str, default='sgd', help='the optimizer')
-    parser.add_argument('--optimizer_G', type=str, default='adam', help='the optimizer')
-    parser.add_argument('--optimizer_D', type=str, default='sgd', help='the optimizer')
+    parser.add_argument('--optimizer_G', type=str, default='amsgrad', help='the optimizer')
+    parser.add_argument('--optimizer_D', type=str, default='amsgrad', help='the optimizer')
     parser.add_argument('--mu', type=float, default=0.001, help='the mu parameter for fedprox')
     parser.add_argument('--noise', type=float, default=0, help='how much noise we add to some party')
     parser.add_argument('--noise_type', type=str, default='level', help='Different level of noise or different space of noise')
@@ -125,14 +126,14 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                     net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
                 elif args.model == "vgg":
                     net = vgg11()
-                    hook_handle = net.features[20].register_forward_hook(hook_fn)
+                    hook_handle = net.features[-1].register_forward_hook(hook_fn_vgg11_reduce_feature_map)
                 elif args.model == "simple-cnn":
                     if args.dataset in ("cifar10", "cinic10", "svhn"):
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=10)
 
                     elif args.dataset in ("mnist", 'femnist', 'fmnist'):
-                        # net = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
-                        net = SimpleCNNMNIST_drop_BN(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
+                        net = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
+                        # net = SimpleCNNMNIST_drop_BN(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
                         hook_handle = net.conv2.register_forward_hook(hook_fn)
                     elif args.dataset == 'celeba':
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=2)
@@ -140,8 +141,9 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                     if args.dataset in ("mnist", 'femnist'):
                         net = ModerateCNNMNIST()
                     elif args.dataset in ("cifar10", "cinic10", "svhn"):
-                        # print("in moderate cnn")
+                        print("in moderate cnn")
                         net = ModerateCNN()
+                        hook_handle = net.conv_layer[-1].register_forward_hook(hook_fn_reduce_feature_map)
                     elif args.dataset == 'celeba':
                         net = ModerateCNN(output_dim=2)
                 elif args.model == "resnet":
@@ -175,6 +177,8 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
     logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
 
+    # optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
+    #                       weight_decay=args.reg)
     if args_optimizer == 'adam':
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
@@ -182,6 +186,11 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
         logger.info('>> Pre-Training AMSGRAD optimizer: {}'.format(optimizer))
     elif args_optimizer == 'sgd':
         optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        print('Optimizer not implemented.')
+
+    # print(optimizer)
+
     criterion = nn.CrossEntropyLoss().to(device)
 
     cnt = 0
@@ -214,8 +223,14 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
                         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
 
                 l1_norm = sum(p.abs().sum() for p in net.parameters())
-
-                loss = criterion(out, target) + args.l1_lambda * l1_norm
+                if args.l1:
+                    loss = criterion(out, target) + args.l1_lambda * l1_norm
+                    # print("with l1 loss")
+                else:
+                    loss = criterion(out, target)
+                # print('out: ', out)
+                # print('target: ', target)
+                # print('loss: ', loss)
                 loss.backward()
                 optimizer.step()
 
@@ -266,14 +281,26 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         else:
             generator_parameters.append(param)
 
-    optimizer = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
-
+    # optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # 可选优化器类型
+    # print(args_optimizer)
+    # print(type(args_optimizer))  # 确认数据类型
+    # print(repr(args_optimizer))  # 使用repr查看可能的隐藏字符
+    # args_optimizer = args_optimizer.strip()  # 清除可能的前后空白
     if args_optimizer == 'adam':
-        optimizer = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
+        optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
+        optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
-        optimizer = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
+        optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
+        optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
     elif args_optimizer == 'sgd':
-        optimizer = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+        optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+        optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        print("Optimizer not implemented.")
+
+    # print(optimizer_g)
 
     cnt = 0
     if type(train_dataloader) == type([1]):
@@ -290,19 +317,36 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
             for batch_idx, (x, target) in enumerate(tmp):
                 x = x.to(device)
                 target = target.to(device)
+                out = net(x)  # 通过模型的前半部分
 
-                optimizer.zero_grad()
+                # -----------训练判别器--------------------
+                # optimizer_d.zero_grad()
+
+                # 生成真实和伪标签
+                fake_labels = torch.full((feature_map.shape[0],), 0.1, device=device)
+                real_labels = torch.full((feature_map.shape[0],), 0.9, device=device)
+
+                # print('Shape of D_real: {}'.format(D_real.shape))
+                # print('Shape of real_labels: {}'.format(real_labels.shape))
+                # D_real = D(feature_map).squeeze()
+                # D_loss_real = criterion_adv(D_real, real_labels)
+                #
+                # feature_map_fake = feature_map.detach()  # 防止梯度传回生成器
+                # D_fake = D(feature_map_fake).squeeze()
+                # D_loss_fake = criterion_adv(D_fake, fake_labels)
+                #
+                # D_loss = (D_loss_real + D_loss_fake) / 2
+                # D_loss.backward(retain_graph=True)
+                # optimizer_d.step()
+
+                # -----------训练生成器--------------------
+                optimizer_g.zero_grad()
                 x.requires_grad = True
                 target.requires_grad = False
                 target = target.long().view(-1)
 
-                # 生成伪标签
-                # fake_labels = torch.zeros((x.shape[0]), 1).to(device).view(-1)
-                fake_labels = torch.full((x.shape[0],), 0.1, device=device)
-                real_labels = torch.full((x.shape[0],), 0.9, device=device)
-
                 # 前向传播，计算生成器输出
-                out = net(x)  # 通过模型的前半部分
+                # out = net(x)  # 通过模型的前半部分
 
                 # 在最后一个 epoch 记录下 G_output
                 if epoch == epochs - 1:
@@ -323,13 +367,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 # adv_loss = criterion_adv(D_out, fake_labels)
                 adv_loss = criterion_adv(D_out, real_labels)
 
+                l1_norm = sum(p.abs().sum() for p in net.parameters())
+
                 # 计算总损失
-                loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
+                if args.l1:
+                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss + args.l1_lambda * l1_norm
+                else:
+                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
+                    # print('Without L1 loss')
                 # loss = 10 * adv_loss
+                # print("Task Loss:", task_loss.item())
+                # print("Adversarial Loss:", adv_loss.item())
+                # print("Weighted Task Loss:", (1 - lambda_adv) * task_loss.item())
+                # print("Weighted Adversarial Loss:", lambda_adv * adv_loss.item())
+                # print("Calculated Total Loss:", loss.item())
                 loss.backward()
 
                 # 更新生成器参数
-                optimizer.step()
+                optimizer_g.step()
 
                 epoch_loss_collector.append(loss.item())
                 epoch_task_loss_collector.append(task_loss.item())
@@ -352,7 +407,6 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
 
 
-
 def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
     logger.info('Training network %s' % str(net_id))
 
@@ -362,6 +416,8 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
     logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
     logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
 
+    optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
+                          weight_decay=args.reg)
     if args_optimizer == 'adam':
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
     elif args_optimizer == 'amsgrad':
@@ -370,7 +426,7 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
     elif args_optimizer == 'sgd':
         optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
     criterion = nn.CrossEntropyLoss().to(device)
-
+    # print(optimizer)
     cnt = 0
     if type(train_dataloader) == type([1]):
         pass
@@ -392,7 +448,9 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
 
                 out = net(x)
                 loss = criterion(out, target)
-
+                print('out: ', out)
+                print('target: ', target)
+                print('loss: ', loss)
                 loss.backward()
                 optimizer.step()
 
@@ -785,6 +843,21 @@ def hook_fn_reduce_feature_map(module, input, output):
     reduced_output = nn.functional.adaptive_avg_pool2d(reduced_output, (n, n))
     feature_map = reduced_output
 
+# for vgg-11 cifar10
+def hook_fn_vgg11_reduce_feature_map(module, input, output):
+    global feature_map
+    # 目标是输出 (BatchSize, 64, 4, 4)
+    m, n = 64, 4  # 输出通道数为 64，空间尺寸为 4x4
+
+    # 卷积层用于减少通道数
+    conv = nn.Conv2d(in_channels=512, out_channels=m, kernel_size=1, stride=1, padding=0).to(output.device)
+    reduced_output = conv(output)  # 将通道数从 512 降到 64
+
+    # 使用插值（上采样）将空间维度从 (1, 1) 调整到 (4, 4)
+    resized_output = nn.functional.interpolate(reduced_output, size=(n, n), mode='bilinear', align_corners=False)
+
+    feature_map = resized_output  # 更新全局特征图变量
+
 
 def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
     client_tensors = {}
@@ -818,6 +891,8 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
         optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
     else:
         optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+
+    # print(optimizer)
 
     # 准备假数据和真实数据
     # client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
@@ -1091,7 +1166,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
     nets_list = list(nets.values())
     return nets_list, G_output_list_all_clients
 
-def local_train_net_fedavg(nets, selected, args, net_dataidx_map, test_dl = None, device="cpu"):
+def local_train_net_fedavg(nets, selected, args, net_dataidx_map, round, test_dl = None, device="cpu"):
     avg_acc = 0.0
 
     for net_id, net in nets.items():
@@ -1130,7 +1205,7 @@ def local_train_net_fedavg(nets, selected, args, net_dataidx_map, test_dl = None
     nets_list = list(nets.values())
     return nets_list
 
-def local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map, test_dl = None, device="cpu"):
+def local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map, round, test_dl = None, device="cpu"):
     avg_acc = 0.0
 
     for net_id, net in nets.items():
@@ -1164,7 +1239,7 @@ def local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map,
     nets_list = list(nets.values())
     return nets_list
 
-def local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, args, net_dataidx_map, test_dl = None, device="cpu"):
+def local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, args, net_dataidx_map, round, test_dl = None, device="cpu"):
     avg_acc = 0.0
 
     total_delta = copy.deepcopy(global_model.state_dict())
@@ -1225,7 +1300,7 @@ def local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, arg
     nets_list = list(nets.values())
     return nets_list
 
-def local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map, test_dl = None, device="cpu"):
+def local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map, round, test_dl = None, device="cpu"):
     avg_acc = 0.0
 
     a_list = []
@@ -1271,7 +1346,7 @@ def local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map,
     nets_list = list(nets.values())
     return nets_list, a_list, d_list, n_list
 
-def local_train_net_moon(nets, selected, args, net_dataidx_map, test_dl=None, global_model = None, prev_model_pool = None, round=None, device="cpu"):
+def local_train_net_moon(nets, selected, args, net_dataidx_map, round, test_dl=None, global_model = None, prev_model_pool = None, round=None, device="cpu"):
     avg_acc = 0.0
     global_model.to(device)
     for net_id, net in nets.items():
@@ -1419,9 +1494,6 @@ if __name__ == '__main__':
 
     D = D.to(device)
     print(D)
-    # 初始化优化器和损失函数
-    d_learning_rate = 0.01
-    loss_d = nn.BCELoss()  # - [p * log(q) + (1-p) * log(1-q)]
 
 
     if args.alg == 'fedgan':
@@ -1568,7 +1640,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            local_train_net_fedavg(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+            local_train_net_fedavg(nets, selected, args, net_dataidx_map, round, test_dl = test_dl_global, device=device)
             # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
             # update global model
@@ -1624,7 +1696,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+            local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map, round, test_dl = test_dl_global, device=device)
             global_model.to('cpu')
 
             # update global model
@@ -1689,7 +1761,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+            local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, args, net_dataidx_map, round, test_dl = test_dl_global, device=device)
             # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
             # update global model
@@ -1759,7 +1831,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            _, a_list, d_list, n_list = local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+            _, a_list, d_list, n_list = local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map, round, test_dl = test_dl_global, device=device)
             total_n = sum(n_list)
             #print("total_n:", total_n)
             d_total_round = copy.deepcopy(global_model.state_dict())
@@ -1844,7 +1916,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            local_train_net_moon(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, global_model=global_model,
+            local_train_net_moon(nets, selected, args, net_dataidx_map, round, test_dl = test_dl_global, global_model=global_model,
                                  prev_model_pool=old_nets_pool, round=round, device=device)
             # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 

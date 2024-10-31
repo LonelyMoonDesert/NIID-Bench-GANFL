@@ -602,7 +602,7 @@ class ModelFedCon(nn.Module):
             basemodel = ResNet50_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
-        elif base_model == "resnet18-cifar10" or base_model == "resnet18":
+        elif base_model == "resnet18-cifar10(5clients)" or base_model == "resnet18":
             basemodel = ResNet18_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
@@ -612,7 +612,7 @@ class ModelFedCon(nn.Module):
         elif base_model == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=n_classes)
             num_ftrs = 84
-        elif base_model == 'simple-cnn-mnist':
+        elif base_model == 'simple-cnn-mnist(5clients)':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
             num_ftrs = 84
 
@@ -666,7 +666,7 @@ class ModelFedCon_noheader(nn.Module):
             basemodel = ResNet50_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
-        elif base_model == "resnet18-cifar10":
+        elif base_model == "resnet18-cifar10(5clients)":
             basemodel = ResNet18_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
@@ -676,7 +676,7 @@ class ModelFedCon_noheader(nn.Module):
         elif base_model == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=n_classes)
             num_ftrs = 84
-        elif base_model == 'simple-cnn-mnist':
+        elif base_model == 'simple-cnn-mnist(5clients)':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
             num_ftrs = 84
 
