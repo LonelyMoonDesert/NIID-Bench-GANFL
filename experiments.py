@@ -22,9 +22,13 @@ from utils import *
 from vggmodel import *
 from resnetcifar import *
 
+import torch.optim.lr_scheduler as lr_scheduler
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='mlp', help='neural network used in training')
+    parser.add_argument('--resume', type=bool, default=True, help='whether to resume training')
+    parser.add_argument('--ckpt_dir', type=str, default='.ckpt/', help='directory to save checkpoints')
     parser.add_argument('--dataset', type=str, default='mnist', help='dataset used for training')
     parser.add_argument('--net_config', type=lambda x: list(map(int, x.split(', '))))
     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
@@ -65,6 +69,27 @@ def get_args():
     parser.add_argument('--noise_type', type=str, default='level', help='Different level of noise or different space of noise')
     parser.add_argument('--rho', type=float, default=0, help='Parameter controlling the momentum SGD')
     parser.add_argument('--sample', type=float, default=1, help='Sample ratio for each communication round')
+
+    # for scheduler
+    parser.add_argument('--scheduler', type=str, default='StepLR', help='Type of scheduler: StepLR, MultiStepLR, etc.')
+    parser.add_argument('--scheduler_g', type=str, default='StepLR', help='Type of scheduler: StepLR, MultiStepLR, etc.')
+    parser.add_argument('--scheduler_d', type=str, default='StepLR', help='Type of scheduler: StepLR, MultiStepLR, etc.')
+    parser.add_argument('--gamma', type=float, default=0.1, help='Decay rate for learning rate.')
+    parser.add_argument('--step_size', type=int, default=30, help='Step size for StepLR.')
+    parser.add_argument('--milestones', type=str, default='30,60',
+                        help='Milestones for MultiStepLR, separated by commas.')
+    parser.add_argument('--T_max', type=int, default=50, help='Maximum number of iterations for CosineAnnealingLR.')
+    parser.add_argument('--factor', type=float, default=0.1,
+                        help='Factor by which the learning rate will be reduced. ReduceLROnPlateau.')
+    parser.add_argument('--patience', type=int, default=10,
+                        help='Number of epochs with no improvement after which learning rate will be reduced. ReduceLROnPlateau.')
+    parser.add_argument('--base_lr', type=float, default=0.001, help='Initial learning rate for CyclicLR.')
+    parser.add_argument('--max_lr', type=float, default=0.01, help='Maximum learning rate for CyclicLR.')
+    parser.add_argument('--step_size_up', type=int, default=2000,
+                        help='Number of training iterations in the increasing half of a cycle. CyclicLR.')
+    parser.add_argument('--steps_per_epoch', type=int, default=1000,
+                        help='Number of steps per epoch, used for OneCycleLR.')
+
     args = parser.parse_args()
     return args
 
@@ -168,7 +193,248 @@ def init_nets(net_configs, dropout_p, n_parties, args):
     return nets, model_meta_data, layer_type
 
 
-def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+def init_optimizers(nets, args):
+    optimizers = {net_i: None for net_i in range(args.n_parties)}
+    for net_i in range(args.n_parties):
+        optimizer = get_optimizer(nets[net_i], args)
+        optimizers[net_i] = optimizer
+
+    return optimizers
+
+def init_optimizers_g(nets, args):
+    optimizers = {net_i: None for net_i in range(args.n_parties)}
+    # TODO: 这里关联的参数改成生成器部分
+
+    for net_i in range(args.n_parties):
+        optimizer = get_optimizer_g(nets[net_i], args)
+        optimizers[net_i] = optimizer
+
+    return optimizers
+
+def init_optimizers_d(D, args):
+    optimizer_d = init_optimizers_d(D, args)
+    return optimizer_d
+def init_scheduler(optimizers, args):
+    schedulers = {net_i: None for net_i in range(args.n_parties)}
+    for net_i in range(args.n_parties):
+        scheduler = get_scheduler(optimizers[net_id], args)
+        schedulers[net_i] = scheduler
+
+    return schedulers
+
+def init_scheduler_g(optimizers, args):
+    schedulers = {net_i: None for net_i in range(args.n_parties)}
+    for net_i in range(args.n_parties):
+        scheduler = get_scheduler_g(optimizers[net_id], args)
+        schedulers[net_i] = scheduler
+
+    return schedulers
+
+def init_scheduler_d(D, args):
+    scheduler_d = init_scheduler_d(D, args)
+    return scheduler_d
+
+def get_optimizer(net, args):
+    """
+    Configure and return the optimizer based on the arguments provided.
+
+    Args:
+        net (torch.nn.Module): The network for which to configure the optimizer.
+        args (argparse.Namespace): Command line arguments or any configuration that includes optimizer settings.
+
+    Returns:
+        torch.optim.Optimizer: Configured optimizer.
+    """
+    # Filter parameters that require gradients (trainable parameters)
+    params = filter(lambda p: p.requires_grad, net.parameters())
+
+    if args.optimizer == 'adam':
+        optimizer = optim.Adam(params, lr=args.lr, weight_decay=args.reg)
+    elif args.optimizer == 'amsgrad':
+        optimizer = optim.Adam(params, lr=args.lr, weight_decay=args.reg, amsgrad=True)
+        print('Using AMSGRAD optimizer with settings:', optimizer)
+    elif args.optimizer == 'sgd':
+        optimizer = optim.SGD(params, lr=args.lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        raise ValueError("Optimizer not implemented. Please choose 'adam', 'amsgrad', or 'sgd'.")
+
+    return optimizer
+
+def get_optimizer_g(net, args):
+    """
+    Configure and return the optimizer based on the arguments provided.
+
+    Args:
+        net (torch.nn.Module): The network for which to configure the optimizer.
+        args (argparse.Namespace): Command line arguments or any configuration that includes optimizer settings.
+
+    Returns:
+        torch.optim.Optimizer: Configured optimizer.
+    """
+    # Filter parameters that require gradients (trainable parameters)
+
+    # params = filter(lambda p: p.requires_grad, net.parameters())
+    params = get_resnet18_generator(net, args)
+
+    if args.optimizer_g == 'adam':
+        optimizer = optim.Adam(params, lr=args.lr, weight_decay=args.reg)
+    elif args.optimizer_g == 'amsgrad':
+        optimizer = optim.Adam(params, lr=args.lr, weight_decay=args.reg, amsgrad=True)
+        print('Using AMSGRAD optimizer with settings:', optimizer)
+    elif args.optimizer_g == 'sgd':
+        optimizer = optim.SGD(params, lr=args.lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        raise ValueError("Optimizer not implemented. Please choose 'adam', 'amsgrad', or 'sgd'.")
+
+    return optimizer
+
+def get_optimizer_d(net, args):
+    """
+    Configure and return the optimizer based on the arguments provided.
+
+    Args:
+        net (torch.nn.Module): The network for which to configure the optimizer.
+        args (argparse.Namespace): Command line arguments or any configuration that includes optimizer settings.
+
+    Returns:
+        torch.optim.Optimizer: Configured optimizer.
+    """
+    # Filter parameters that require gradients (trainable parameters)
+    params = filter(lambda p: p.requires_grad, net.parameters())
+
+    if args.optimizer_d == 'adam':
+        optimizer = optim.Adam(params, lr=args.lr, weight_decay=args.reg)
+    elif args.optimizer_d == 'amsgrad':
+        optimizer = optim.Adam(params, lr=args.lr, weight_decay=args.reg, amsgrad=True)
+        print('Using AMSGRAD optimizer with settings:', optimizer)
+    elif args.optimizer_d == 'sgd':
+        optimizer = optim.SGD(params, lr=args.lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        raise ValueError("Optimizer not implemented. Please choose 'adam', 'amsgrad', or 'sgd'.")
+
+    return optimizer
+
+def get_scheduler(optimizer, args):
+    """
+    Setup the learning rate scheduler based on command line arguments.
+
+    Args:
+        optimizer (torch.optim.Optimizer): The optimizer for which to schedule the learning rate.
+        args (argparse.Namespace): Command line arguments containing scheduler settings.
+
+    Returns:
+        torch.optim.lr_scheduler: The configured learning rate scheduler.
+    """
+    if args.scheduler == 'StepLR':
+        scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    elif args.scheduler == 'MultiStepLR':
+        milestones = list(map(int, args.milestones.split(',')))
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=args.gamma)
+    elif args.scheduler == 'ExponentialLR':
+        scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=args.gamma)
+    elif args.scheduler == 'CosineAnnealingLR':
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.T_max)
+    elif args.scheduler == 'ReduceLROnPlateau':
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=args.factor, patience=args.patience)
+    elif args.scheduler == 'CyclicLR':
+        scheduler = lr_scheduler.CyclicLR(optimizer, base_lr=args.base_lr, max_lr=args.max_lr,
+                                          step_size_up=args.step_size_up)
+    elif args.scheduler == 'OneCycleLR':
+        scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.max_lr, steps_per_epoch=int(args.steps_per_epoch),
+                                            epochs=args.epochs)
+    else:
+        raise ValueError('Unsupported scheduler type!')
+    return scheduler
+
+def get_scheduler_g(optimizer, args):
+    """
+    Setup the learning rate scheduler based on command line arguments.
+
+    Args:
+        optimizer (torch.optim.Optimizer): The optimizer for which to schedule the learning rate.
+        args (argparse.Namespace): Command line arguments containing scheduler settings.
+
+    Returns:
+        torch.optim.lr_scheduler: The configured learning rate scheduler.
+    """
+    if args.scheduler_g == 'StepLR':
+        scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    elif args.scheduler_g == 'MultiStepLR':
+        milestones = list(map(int, args.milestones.split(',')))
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=args.gamma)
+    elif args.scheduler_g == 'ExponentialLR':
+        scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=args.gamma)
+    elif args.scheduler_g == 'CosineAnnealingLR':
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.T_max)
+    elif args.scheduler_g == 'ReduceLROnPlateau':
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=args.factor, patience=args.patience)
+    elif args.scheduler_g == 'CyclicLR':
+        scheduler = lr_scheduler.CyclicLR(optimizer, base_lr=args.base_lr, max_lr=args.max_lr,
+                                          step_size_up=args.step_size_up)
+    elif args.scheduler_g == 'OneCycleLR':
+        scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.max_lr, steps_per_epoch=int(args.steps_per_epoch),
+                                            epochs=args.epochs)
+    else:
+        raise ValueError('Unsupported scheduler type!')
+    return scheduler
+
+def get_scheduler_d(optimizer, args):
+    """
+    Setup the learning rate scheduler based on command line arguments.
+
+    Args:
+        optimizer (torch.optim.Optimizer): The optimizer for which to schedule the learning rate.
+        args (argparse.Namespace): Command line arguments containing scheduler settings.
+
+    Returns:
+        torch.optim.lr_scheduler: The configured learning rate scheduler.
+    """
+    if args.scheduler_d == 'StepLR':
+        scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    elif args.scheduler_d == 'MultiStepLR':
+        milestones = list(map(int, args.milestones.split(',')))
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=args.gamma)
+    elif args.scheduler_d == 'ExponentialLR':
+        scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=args.gamma)
+    elif args.scheduler_d == 'CosineAnnealingLR':
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.T_max)
+    elif args.scheduler_d == 'ReduceLROnPlateau':
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=args.factor, patience=args.patience)
+    elif args.scheduler_d == 'CyclicLR':
+        scheduler = lr_scheduler.CyclicLR(optimizer, base_lr=args.base_lr, max_lr=args.max_lr,
+                                          step_size_up=args.step_size_up)
+    elif args.scheduler_d == 'OneCycleLR':
+        scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.max_lr, steps_per_epoch=int(args.steps_per_epoch),
+                                            epochs=args.epochs)
+    else:
+        raise ValueError('Unsupported scheduler type!')
+    return scheduler
+
+
+def get_resnet18_generator(net, args):
+    # 获取生成器部分的参数（conv1 到 layer3 之前的所有层）
+    generator_parameters = []
+    for name, param in net.named_parameters():
+        if 'layer4' in name or 'avgpool' in name or 'fc' in name:
+            param.requires_grad = False
+        else:
+            generator_parameters.append(param)
+
+    return generator_parameters
+
+
+def get_vgg11_generator(net, args):
+    # 获取生成器部分的参数（所有 features 的卷积层）
+    generator_parameters = []
+    for name, param in net.named_parameters():
+        if 'classifier' in name:
+            param.requires_grad = False  # 冻结 classifier 中的参数，通常包含三个全连接层
+        else:
+            generator_parameters.append(param)  # 保留 features 中的参数
+
+    return generator_parameters
+
+def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, optimizers, schedulers, device="cpu"):
     logger.info('Training network %s' % str(net_id))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
@@ -179,17 +445,23 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 
     # optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
     #                       weight_decay=args.reg)
-    if args_optimizer == 'adam':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
-    elif args_optimizer == 'amsgrad':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
-        logger.info('>> Pre-Training AMSGRAD optimizer: {}'.format(optimizer))
-    elif args_optimizer == 'sgd':
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
-    else:
-        print('Optimizer not implemented.')
+    # if args_optimizer == 'adam':
+    #     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+    # elif args_optimizer == 'amsgrad':
+    #     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+    #     logger.info('>> Pre-Training AMSGRAD optimizer: {}'.format(optimizer))
+    # elif args_optimizer == 'sgd':
+    #     optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # else:
+    #     print('Optimizer not implemented.')
+    #
+    # # scheduler
+    # scheduler = get_scheduler(optimizer, args)
 
-    # print(optimizer)
+    # 加载optimizer
+    optimizer = optimizers[net_id]
+    # 加载scheduler
+    scheduler = schedulers[net_id]
 
     criterion = nn.CrossEntropyLoss().to(device)
 
@@ -202,6 +474,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     G_output_list = None
     for epoch in range(epochs):
         epoch_loss_collector = []
+        epoch_l1_loss_collector = []
         for tmp in train_dataloader:
             for batch_idx, (x, target) in enumerate(tmp):
                 x, target = x.to(device), target.to(device)
@@ -224,7 +497,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 
                 l1_norm = sum(p.abs().sum() for p in net.parameters())
                 if args.l1:
-                    loss = criterion(out, target) + args.l1_lambda * l1_norm
+                    loss = criterion(out, target) + 0.01 * args.l1_lambda * l1_norm
                     # print("with l1 loss")
                 else:
                     loss = criterion(out, target)
@@ -236,9 +509,21 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 
                 cnt += 1
                 epoch_loss_collector.append(loss.item())
+                if args.l1:
+                    epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
 
         epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-        logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+        epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+        if args.l1:
+            logger.info('Epoch: %d Loss: %f L1 loss: %f' % (epoch, epoch_loss, epoch_l1_loss))
+        else:
+            logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+
+        if args.scheduler == 'ReduceLROnPlateau':
+            scheduler.step(epoch)
+        else:
+            scheduler.step()
+
 
     logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
 
@@ -250,7 +535,19 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 
     net.to('cpu')
     logger.info(' ** Training complete **')
-    return train_acc, test_acc, G_output_list
+
+    # Save the training state
+    checkpoint = {
+        'client': net_id,
+        'model': net.state_dict(),  # Corrected key to 'model_state'
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+        'round': round
+    }
+    filename = f"client{net_id}_round{round}.pth"
+    save_checkpoint(checkpoint, './checkpoints', filename)
+
+    return train_acc, test_acc, G_output_list, checkpoint
 
 # 定义对抗训练的函数，用于在客户端上更新生成器
 # nets: 客户端模型列表
@@ -260,7 +557,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 # net_dataidx_map: 数据索引映射
 # train_dl: 本地训练数据加载器
 # device: 设备（例如 "cpu" 或 "cuda"）
-def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, optimizers_g, schedulers_g, device="cpu"):
     logger.info('Starting adversarial training of clients...')
     criterion_task = nn.CrossEntropyLoss().to(device)
     criterion_adv = nn.BCELoss().to(device)
@@ -273,13 +570,13 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
     # 初始化优化器，只对生成器部分的参数进行优化
     # 获取生成器部分的参数（conv1 到 layer3 之前的所有层）
-    generator_parameters = []
+    # generator_parameters = []
     G_output_list = None
-    for name, param in net.named_parameters():
-        if 'layer4' in name or 'avgpool' in name or 'fc' in name:
-            param.requires_grad = False
-        else:
-            generator_parameters.append(param)
+    # for name, param in net.named_parameters():
+    #     if 'layer4' in name or 'avgpool' in name or 'fc' in name:
+    #         param.requires_grad = False
+    #     else:
+    #         generator_parameters.append(param)
 
     # optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
     # optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
@@ -288,19 +585,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     # print(type(args_optimizer))  # 确认数据类型
     # print(repr(args_optimizer))  # 使用repr查看可能的隐藏字符
     # args_optimizer = args_optimizer.strip()  # 清除可能的前后空白
-    if args_optimizer == 'adam':
-        optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
-        optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg)
-    elif args_optimizer == 'amsgrad':
-        optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
-        optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
-    elif args_optimizer == 'sgd':
-        optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
-        optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
-    else:
-        print("Optimizer not implemented.")
+    # if args_optimizer == 'adam':
+    #     optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
+    #     optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg)
+    # elif args_optimizer == 'amsgrad':
+    #     optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
+    #     optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+    # elif args_optimizer == 'sgd':
+    #     optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+    #     optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # else:
+    #     print("Optimizer not implemented.")
+    #
+    # scheduler = get_scheduler(optimizer_g, args)
 
-    # print(optimizer_g)
+    # 加载optimizer
+    optimizer_g = optimizers_g[net_id]
+    # 加载scheduler
+    scheduler_g = schedulers_g[net_id]
 
     cnt = 0
     if type(train_dataloader) == type([1]):
@@ -313,6 +615,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         epoch_loss_collector = []
         epoch_task_loss_collector = []
         epoch_adv_loss_collector = []
+        epoch_l1_loss_collector = []
         for tmp in train_dataloader:
             for batch_idx, (x, target) in enumerate(tmp):
                 x = x.to(device)
@@ -371,16 +674,16 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
                 # 计算总损失
                 if args.l1:
-                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss + args.l1_lambda * l1_norm
+                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss + 0.01 * args.l1_lambda * l1_norm
                 else:
                     loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
                     # print('Without L1 loss')
-                # loss = 10 * adv_loss
-                # print("Task Loss:", task_loss.item())
-                # print("Adversarial Loss:", adv_loss.item())
-                # print("Weighted Task Loss:", (1 - lambda_adv) * task_loss.item())
-                # print("Weighted Adversarial Loss:", lambda_adv * adv_loss.item())
-                # print("Calculated Total Loss:", loss.item())
+
+                # if args.l1:
+                #     loss = task_loss + adv_loss + args.l1_lambda * l1_norm
+                # else:
+                #     loss = task_loss + adv_loss
+
                 loss.backward()
 
                 # 更新生成器参数
@@ -389,9 +692,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 epoch_loss_collector.append(loss.item())
                 epoch_task_loss_collector.append(task_loss.item())
                 epoch_adv_loss_collector.append(adv_loss.item())
+                if args.l1:
+                    epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
 
         # 记录每个epoch最后一个batch的损失
-        logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f' % (epoch, epoch_loss_collector[-1], epoch_task_loss_collector[-1], epoch_adv_loss_collector[-1]))
+        epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+        epoch_task_loss = sum(epoch_task_loss_collector) / len(epoch_task_loss_collector)
+        epoch_adv_loss = sum(epoch_adv_loss_collector) / len(epoch_adv_loss_collector)
+        epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+
+        if args.l1:
+            logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f L1 norm: %f' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss, epoch_l1_loss))
+        else:
+            logger.info('Epoch: %d Last Batch Total Loss: %f' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss))
+
+        if args.scheduler == 'ReduceLROnPlateau':
+            scheduler_g.step(epoch)
+        else:
+            scheduler_g.step()
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
@@ -403,11 +721,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
     net.to('cpu')
     logger.info(' ** Training complete **')
-    return train_acc, test_acc, G_output_list
+
+    # 保存模型
+    # Save the training state
+    checkpoint = {
+        'client': net_id,
+        'model': net.state_dict(),  # Corrected key to 'model_state'
+        'optimizer': optimizer_g.state_dict(),
+        'scheduler': scheduler_g.state_dict(),
+        'round': round
+    }
+    filename = f"adv_client{net_id}_round{round}.pth"
+    save_checkpoint(checkpoint, './checkpoints', filename)
+
+    return train_acc, test_acc, G_output_list, checkpoint
 
 
 
-def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, device="cpu"):
     logger.info('Training network %s' % str(net_id))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
@@ -435,6 +766,9 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
 
     #writer = SummaryWriter()
 
+    if round % 2 != 0:
+        epochs = epochs - 2
+
     for epoch in range(epochs):
         epoch_loss_collector = []
         for tmp in train_dataloader:
@@ -448,9 +782,7 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
 
                 out = net(x)
                 loss = criterion(out, target)
-                print('out: ', out)
-                print('target: ', target)
-                print('loss: ', loss)
+
                 loss.backward()
                 optimizer.step()
 
@@ -484,7 +816,7 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
     logger.info(' ** Training complete **')
     return train_acc, test_acc
 
-def train_net_fedprox(net_id, net, global_net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, mu, device="cpu"):
+def train_net_fedprox(net_id, net, global_net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, mu, round, device="cpu"):
     logger.info('Training network %s' % str(net_id))
     logger.info('n_training: %d' % len(train_dataloader))
     logger.info('n_test: %d' % len(test_dataloader))
@@ -509,6 +841,9 @@ def train_net_fedprox(net_id, net, global_net, train_dataloader, test_dataloader
     cnt = 0
     # mu = 0.001
     global_weight_collector = list(global_net.to(device).parameters())
+
+    if round % 2 != 0:
+        epochs = epochs - 2
 
     for epoch in range(epochs):
         epoch_loss_collector = []
@@ -556,7 +891,7 @@ def train_net_fedprox(net_id, net, global_net, train_dataloader, test_dataloader
     logger.info(' ** Training complete **')
     return train_acc, test_acc
 
-def train_net_scaffold(net_id, net, global_model, c_local, c_global, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+def train_net_scaffold(net_id, net, global_model, c_local, c_global, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, device="cpu"):
     logger.info('Training network %s' % str(net_id))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
@@ -588,6 +923,9 @@ def train_net_scaffold(net_id, net, global_model, c_local, c_global, train_datal
 
     c_global_para = c_global.state_dict()
     c_local_para = c_local.state_dict()
+
+    if round % 2 != 0:
+        epochs = epochs - 2
 
     for epoch in range(epochs):
         epoch_loss_collector = []
@@ -638,7 +976,7 @@ def train_net_scaffold(net_id, net, global_model, c_local, c_global, train_datal
     logger.info(' ** Training complete **')
     return train_acc, test_acc, c_delta_para
 
-def train_net_fednova(net_id, net, global_model, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+def train_net_fednova(net_id, net, global_model, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, device="cpu"):
     logger.info('Training network %s' % str(net_id))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
@@ -659,6 +997,9 @@ def train_net_fednova(net_id, net, global_model, train_dataloader, test_dataload
 
 
     tau = 0
+
+    if round % 2 != 0:
+        epochs = epochs - 2
 
     for epoch in range(epochs):
         epoch_loss_collector = []
@@ -744,6 +1085,9 @@ def train_net_moon(net_id, net, global_net, previous_nets, train_dataloader, tes
     cnt = 0
     cos=torch.nn.CosineSimilarity(dim=-1).to(device)
     # mu = 0.001
+
+    if round % 2 != 0:
+        epochs = epochs - 2
 
     for epoch in range(epochs):
         epoch_loss_collector = []
@@ -878,22 +1222,23 @@ def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
 
 
 # 新增的判别器训练函数
-def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args_optimizer, lr, epochs=5, batch_size=64):
+def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, optimizer_d, scheduler_d, lr, epochs=5, batch_size=64):
     D.train()  # 确保判别器处于训练模式
     criterion = nn.BCELoss()  # 二元交叉熵损失
 
     # 根据优化器类型选择优化器
-    if args_optimizer == 'adam':
-        optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg)
-    elif args_optimizer == 'amsgrad':
-        optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg, amsgrad=True)
-    elif args_optimizer == 'sgd':
-        optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
-    else:
-        optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # if args_optimizer == 'adam':
+    #     optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg)
+    # elif args_optimizer == 'amsgrad':
+    #     optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg, amsgrad=True)
+    # elif args_optimizer == 'sgd':
+    #     optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # else:
+    #     optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
 
     # print(optimizer)
-
+    optimizer = optimizer_d
+    scheduler = scheduler_d
     # 准备假数据和真实数据
     # client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
     # fake_data = torch.cat([tensor for _, tensor in client_tensors.items()], dim=0).to(device)  # 将假数据迁移到指定设备
@@ -970,6 +1315,11 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
         accuracy = 100 * correct / total
         logger.info(f'Epoch {epoch + 1}/{epochs}, Discriminator Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
 
+        if args.scheduler_d == 'ReduceLROnPlateau':
+            scheduler.step(epoch)
+        else:
+            scheduler.step()
+
     logger.info(' ** Discriminator training complete **')
     D.eval()  # 训练结束后将判别器设置为评估模式
 
@@ -1033,6 +1383,110 @@ def get_feature_maps(nets, selected, args, net_dataidx_map, test_dl=None, device
 
     return G_output_list_all_clients
 
+
+def save_checkpoint(state, checkpoint_dir, filename="checkpoint.pth.tar"):
+    """
+    Saves the training checkpoint to a specified directory with a given filename.
+    Ensures that the directory structure is consistent across various saving functions.
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure the directory exists.
+    filepath = os.path.join(checkpoint_dir, filename)
+    torch.save(state, filepath)
+    print("Checkpoint saved to {}".format(filepath))
+
+def save_global_model(global_model_checkpoint, directory, filename="global_model.pth"):
+    """
+    Save the global model state to a specified directory with a consistent filename format.
+    This also saves the round number for tracking the training progress.
+    """
+    os.makedirs(directory, exist_ok=True)
+    filepath = os.path.join(directory, filename)
+    torch.save(global_model_checkpoint, filepath)
+    print("Global model saved to {}".format(filepath))
+
+def save_clients_state(clients_state, directory, filename="global_model.pth"):
+    """
+    Save the global model state to a specified directory with a consistent filename format.
+    This also saves the round number for tracking the training progress.
+    """
+    os.makedirs(directory, exist_ok=True)
+    filepath = os.path.join(directory, filename)
+    torch.save(clients_state, filepath)
+    print("Clients_state saved to {}".format(filepath))
+
+def load_global_model(global_model_state, directory, filename="global_model.pth"):
+    """
+    Load the global model state from a specified directory, ensuring consistency in file handling.
+    """
+    filepath = os.path.join(directory, filename)
+    if os.path.exists(filepath):
+        checkpoint = torch.load(filepath)
+        global_model_state['model'].load_state_dict(checkpoint['model'])
+        global_model_state['D'].load_state_dict(checkpoint['D'])
+        global_model_state['optimizer_d'].load_state_dict(checkpoint['optimizer_d'])
+        global_model_state['scheduler_d'].load_state_dict(checkpoint['scheduler_d'])
+        global_model_state['round'].load_state_dict(checkpoint['round'])
+        print("Global model loaded from {}".format(filepath))
+        return checkpoint['round']
+    else:
+        print("No global model checkpoint found at {}".format(filepath))
+        return None
+
+def load_client_states(clients_state, directory, filename):
+    """
+    Load each client's model, optimizer, and scheduler states from specified directory.
+    """
+
+    for client_id, client_state in clients_state.items():
+        filepath = os.path.join(directory, f'client_{client_id}_state.pth')
+        if os.path.exists(filepath):
+            client_state_ckpt = torch.load(filepath)
+            client_state['client'].load_state_dict(client_state_ckpt['client'])
+            client_state['model'].load_state_dict(client_state_ckpt['model'])
+            client_state['optimizer'].load_state_dict(client_state_ckpt['optimizer'])
+            client_state['optimizer_g '].load_state_dict(client_state_ckpt['optimizer_g'])
+            client_state['scheduler'].load_state_dict(client_state_ckpt['scheduler'])
+            client_state['scheduler_g'].load_state_dict(client_state_ckpt['scheduler_g'])
+            client_state['round'].load_state_dict(client_state_ckpt['round'])
+
+            print("State loaded for client {} from {}".format(client_id, filepath))
+        else:
+            print("No checkpoint found for client {} at {}".format(client_id, filepath))
+
+
+def initialize_global_state(global_model, D, args):
+    global_state = {}
+    model = global_model
+    optimizer_d = get_optimizer_d(model, args)
+    scheduler_d = get_scheduler_d(optimizer_d)
+    global_state = {
+        'model': model,
+        'D': D,
+        'optimizer_d': optimizer_d,
+        'scheduler_d': scheduler_d,
+        'round': 0  # 初始化回合数
+    }
+    return global_state
+
+
+def initialize_clients_state(nets, args):
+    clients_state = {}
+    for client_id in range(args.n_parties):
+        model = nets[client_id]
+        optimizer = get_optimizer(model, args)
+        optimizer_g = get_optimizer_g(model, args)
+        scheduler = get_scheduler(optimizer)
+        scheduler_g = get_scheduler_g(optimizer_g)
+        clients_state[client_id] = {
+            'client': client_id,  # 这里的 'client' 可能是冗余的，除非有特定用途
+            'model': model,
+            'optimizer': optimizer,
+            'optimizer_g': optimizer,
+            'scheduler': scheduler,
+            'scheduler_g': scheduler_g,
+            'round': 0  # 初始化回合数
+        }
+    return clients_state
 
 def update_client_task_layers(global_model, client_models):
     # 提取全局模型的状态字典
@@ -1117,10 +1571,11 @@ def generate_real_samples(global_model, data_loader, device="cpu"):
     return real_samples
 
 
-def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl=None, device="cpu"):
+def local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers, schedulers, optimizers_g, schedulers_g, adv=False, test_dl=None, device="cpu"):
     avg_acc = 0.0
 
     G_output_list_all_clients = None
+    checkpoint_all_clients = {}
     for net_id, net in nets.items():
         if net_id not in selected:
             continue
@@ -1143,9 +1598,12 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
         n_epoch = args.epochs
 
         if not adv:
-            trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
+            trainacc, testacc, G_output_list, checkpoint = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, round, optimizers, schedulers, device=device)
         else:
-            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, device=device)
+            trainacc, testacc, G_output_list, checkpoint = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, round, optimizers_g, schedulers_g, device=device)
+
+        # 保存客户端的checkpoint
+        checkpoint_all_clients[checkpoint['client']] = checkpoint
 
         if G_output_list_all_clients is None:
             G_output_list_all_clients = G_output_list
@@ -1164,7 +1622,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
         logger.info("avg test acc %f" % avg_acc)
 
     nets_list = list(nets.values())
-    return nets_list, G_output_list_all_clients
+    return nets_list, G_output_list_all_clients, checkpoint_all_clients
 
 def local_train_net_fedavg(nets, selected, args, net_dataidx_map, round, test_dl = None, device="cpu"):
     avg_acc = 0.0
@@ -1191,7 +1649,7 @@ def local_train_net_fedavg(nets, selected, args, net_dataidx_map, round, test_dl
         n_epoch = args.epochs
 
 
-        trainacc, testacc = train_net_fedavg(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
+        trainacc, testacc = train_net_fedavg(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, round, device=device)
         logger.info("net %d final test acc %f" % (net_id, testacc))
         avg_acc += testacc
         # saving the trained models here
@@ -1229,7 +1687,7 @@ def local_train_net_fedprox(nets, selected, global_model, args, net_dataidx_map,
         train_dl_global, test_dl_global, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32)
         n_epoch = args.epochs
 
-        trainacc, testacc = train_net_fedprox(net_id, net, global_model, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, args.mu, device=device)
+        trainacc, testacc = train_net_fedprox(net_id, net, global_model, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, args.mu, round, device=device)
         logger.info("net %d final test acc %f" % (net_id, testacc))
         avg_acc += testacc
     avg_acc /= len(selected)
@@ -1271,7 +1729,7 @@ def local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, arg
         n_epoch = args.epochs
 
 
-        trainacc, testacc, c_delta_para = train_net_scaffold(net_id, net, global_model, c_nets[net_id], c_global, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
+        trainacc, testacc, c_delta_para = train_net_scaffold(net_id, net, global_model, c_nets[net_id], c_global, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, round, device=device)
 
         c_nets[net_id].to('cpu')
         for key in total_delta:
@@ -1329,7 +1787,7 @@ def local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map,
         n_epoch = args.epochs
 
 
-        trainacc, testacc, a_i, d_i = train_net_fednova(net_id, net, global_model, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, device=device)
+        trainacc, testacc, a_i, d_i = train_net_fednova(net_id, net, global_model, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, round, device=device)
 
         a_list.append(a_i)
         d_list.append(d_i)
@@ -1346,7 +1804,7 @@ def local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map,
     nets_list = list(nets.values())
     return nets_list, a_list, d_list, n_list
 
-def local_train_net_moon(nets, selected, args, net_dataidx_map, round, test_dl=None, global_model = None, prev_model_pool = None, round=None, device="cpu"):
+def local_train_net_moon(nets, selected, args, net_dataidx_map, test_dl=None, global_model = None, prev_model_pool = None, round=None, device="cpu"):
     avg_acc = 0.0
     global_model.to(device)
     for net_id, net in nets.items():
@@ -1495,25 +1953,38 @@ if __name__ == '__main__':
     D = D.to(device)
     print(D)
 
-
     if args.alg == 'fedgan':
         logger.info("Initializing nets")
+
         nets, local_model_meta_data, layer_type = init_nets(args.net_config, args.dropout_p, args.n_parties, args)
         global_models, global_model_meta_data, global_layer_type = init_nets(args.net_config, 0, 1, args)
         global_model = global_models[0]
+
+        # 断点继续：加载全局模型
+        global_state = initialize_global_state(global_model, D, args)
+
+        previous_round = 0
+        if args.resume:  # True
+            previous_round = load_global_model(global_state, os.path.join(args.ckpt_dir, 'global_model.pth'))+1
+
+        global_model = global_state['model']
+        D = global_state['D']
+        optimizer_d = global_state['optimizer_d']
+        scheduler_d = global_state['scheduler_d']
 
         global_para = global_model.state_dict()
         if args.is_same_initial:
             for net_id, net in nets.items():
                 net.load_state_dict(global_para)
 
-        for round in range(args.comm_round):
+        for round in range(0 + previous_round, args.comm_round):
             logger.info("in comm round:" + str(round))
 
             arr = np.arange(args.n_parties)
             np.random.shuffle(arr)
             selected = arr[:int(args.n_parties * args.sample)]
 
+            # 给各客户端加载模型
             global_para = global_model.state_dict()
             if round == 0:
                 if args.is_same_initial:
@@ -1523,6 +1994,26 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
+            # 给各客户端加载状态
+            # 假设初始化客户端时的代码如下：
+            clients_state = initialize_clients_state(args.n_parties, nets)
+
+            # 断点继续：加载客户端optimizer和scheduler
+            optimizers = {}
+            optimizers_g = {}
+            schedulers = {}
+            schedulers_g = {}
+            if args.resume:
+                load_client_states(clients_state, args.ckpt_dir)
+
+            for net_id, net in nets.items():
+                nets[net_id] = clients_state[net_id]['model']
+                optimizers[net_id] = clients_state[net_id]['optimizer']
+                optimizers_g[net_id] = clients_state[net_id]['optimizer_g']
+                schedulers[net_id] = schedulers[net_id]['scheduler']
+                schedulers_g[net_id] = schedulers_g[net_id]['scheduler_g']
+
+
             # update_client_task_layers(global_model, nets)
 
             # if round == 0:
@@ -1531,7 +2022,15 @@ if __name__ == '__main__':
             #     _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = True, test_dl = test_dl_global, device=device)
             # # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
-            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = False, test_dl = test_dl_global, device=device)
+            _, G_output_list_all_clients, checkpoint_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers, schedulers, adv = False, test_dl = test_dl_global, device=device)
+
+            # 更新clients_state
+            for net_id, net in nets.items():
+                nets[net_id] = checkpoint_all_clients[net_id]['model']
+                optimizers[net_id] = checkpoint_all_clients[net_id]['optimizer']
+                optimizers_g[net_id] = checkpoint_all_clients[net_id]['optimizer_g']
+                schedulers[net_id] = checkpoint_all_clients[net_id]['scheduler']
+                schedulers_g[net_id] = checkpoint_all_clients[net_id]['scheduler_g']
 
             # update global model
             total_data_points = sum([len(net_dataidx_map[r]) for r in selected])
@@ -1578,14 +2077,14 @@ if __name__ == '__main__':
 
             G_output_list_all_clients = get_feature_maps(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, device=device)
 
-            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args.optimizer_D, args.lr_D, args.epoch_D,
+            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, optimizer_d, scheduler_d, args.lr_D, args.epoch_D,
                                 batch_size=args.batch_size)
 
             # 对抗训练客户端
             # 将判别器的输出形成的loss发送到各client，让它们进行对抗训练
             # 这里首先进了local_train_net函数中，然后再分流到执行adv_train_net函数
             # local_train_net(nets, selected, args, net_dataidx_map, D, adv=True, test_dl=test_dl_global, device=device)
-            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv=True, test_dl=test_dl_global, device=device)
+            _, G_output_list_all_clients, checkpoint_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers, schedulers, adv=True, test_dl=test_dl_global, device=device)
 
             # 第二轮update global model
             total_data_points = sum([len(net_dataidx_map[r]) for r in selected])
@@ -1612,6 +2111,29 @@ if __name__ == '__main__':
 
             logger.info('>> Global Model Train accuracy: %f' % train_acc)
             logger.info('>> Global Model Test accuracy: %f' % test_acc)
+
+            # 保存global model
+            save_global_model(global_model, round, args.ckpt_dir, 'global_model.pth')
+            # 保存clients状态
+            clients_state = {}
+            for net_id in range(len(nets)):
+                optimizer = get_optimizer(nets[net_id], args)
+                optimizer_g = get_optimizer_g(nets[net_id], args)
+                optimizer_d = get_optimizer_d(nets[net_id], args)
+                scheduler = get_scheduler(optimizer, args)
+                scheduler_g = get_scheduler_g(optimizer_g, args)
+                scheduler_d = get_scheduler_d(optimizer_d, args)
+                clients_state[net_id] = {
+                    'model': nets[net_id],
+                    'optimizer': optimizer,
+                    'optimizer_g': optimizer_g,
+                    'optimizer_d': optimizer_d,
+                    'scheduler': scheduler,
+                    'scheduler_g': scheduler_g,
+                    'scheduler_d': scheduler_d
+                }
+
+            save_client_states(clients_state, args)
 
     elif args.alg == 'fedavg':
         logger.info("Initializing nets")
@@ -1916,7 +2438,7 @@ if __name__ == '__main__':
                 for idx in selected:
                     nets[idx].load_state_dict(global_para)
 
-            local_train_net_moon(nets, selected, args, net_dataidx_map, round, test_dl = test_dl_global, global_model=global_model,
+            local_train_net_moon(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, global_model=global_model,
                                  prev_model_pool=old_nets_pool, round=round, device=device)
             # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
