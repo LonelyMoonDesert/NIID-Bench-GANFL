@@ -28,7 +28,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='mlp', help='neural network used in training')
     parser.add_argument('--resume', type=bool, default=True, help='whether to resume training')
-    parser.add_argument('--ckpt_dir', type=str, default='.ckpt/', help='directory to save checkpoints')
+    parser.add_argument('--ckpt_dir', type=str, default='./checkpoint', help='directory to save checkpoints')
     parser.add_argument('--dataset', type=str, default='mnist', help='dataset used for training')
     parser.add_argument('--net_config', type=lambda x: list(map(int, x.split(', '))))
     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
@@ -434,7 +434,7 @@ def get_vgg11_generator(net, args):
 
     return generator_parameters
 
-def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, optimizers, schedulers, device="cpu"):
+def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, device="cpu"):
     logger.info('Training network %s' % str(net_id))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
@@ -445,23 +445,23 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 
     # optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
     #                       weight_decay=args.reg)
-    # if args_optimizer == 'adam':
-    #     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
-    # elif args_optimizer == 'amsgrad':
-    #     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
-    #     logger.info('>> Pre-Training AMSGRAD optimizer: {}'.format(optimizer))
-    # elif args_optimizer == 'sgd':
-    #     optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
-    # else:
-    #     print('Optimizer not implemented.')
-    #
-    # # scheduler
-    # scheduler = get_scheduler(optimizer, args)
+    if args_optimizer == 'adam':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+    elif args_optimizer == 'amsgrad':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+        logger.info('>> Pre-Training AMSGRAD optimizer: {}'.format(optimizer))
+    elif args_optimizer == 'sgd':
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        print('Optimizer not implemented.')
 
-    # 加载optimizer
-    optimizer = optimizers[net_id]
-    # 加载scheduler
-    scheduler = schedulers[net_id]
+    # scheduler
+    scheduler = get_scheduler(optimizer, args)
+
+    # # 加载optimizer
+    # optimizer = optimizers[net_id]
+    # # 加载scheduler
+    # scheduler = schedulers[net_id]
 
     criterion = nn.CrossEntropyLoss().to(device)
 
@@ -513,8 +513,9 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
                     epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
 
         epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-        epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+
         if args.l1:
+            epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
             logger.info('Epoch: %d Loss: %f L1 loss: %f' % (epoch, epoch_loss, epoch_l1_loss))
         else:
             logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
@@ -547,7 +548,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     filename = f"client{net_id}_round{round}.pth"
     save_checkpoint(checkpoint, './checkpoints', filename)
 
-    return train_acc, test_acc, G_output_list, checkpoint
+    return train_acc, test_acc, G_output_list
 
 # 定义对抗训练的函数，用于在客户端上更新生成器
 # nets: 客户端模型列表
@@ -557,7 +558,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 # net_dataidx_map: 数据索引映射
 # train_dl: 本地训练数据加载器
 # device: 设备（例如 "cpu" 或 "cuda"）
-def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, optimizers_g, schedulers_g, device="cpu"):
+def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader, epochs, lr, args_optimizer, round, device="cpu"):
     logger.info('Starting adversarial training of clients...')
     criterion_task = nn.CrossEntropyLoss().to(device)
     criterion_adv = nn.BCELoss().to(device)
@@ -570,13 +571,13 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
     # 初始化优化器，只对生成器部分的参数进行优化
     # 获取生成器部分的参数（conv1 到 layer3 之前的所有层）
-    # generator_parameters = []
+    generator_parameters = []
     G_output_list = None
-    # for name, param in net.named_parameters():
-    #     if 'layer4' in name or 'avgpool' in name or 'fc' in name:
-    #         param.requires_grad = False
-    #     else:
-    #         generator_parameters.append(param)
+    for name, param in net.named_parameters():
+        if 'layer4' in name or 'avgpool' in name or 'fc' in name:
+            param.requires_grad = False
+        else:
+            generator_parameters.append(param)
 
     # optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
     # optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
@@ -585,24 +586,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     # print(type(args_optimizer))  # 确认数据类型
     # print(repr(args_optimizer))  # 使用repr查看可能的隐藏字符
     # args_optimizer = args_optimizer.strip()  # 清除可能的前后空白
-    # if args_optimizer == 'adam':
-    #     optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
-    #     optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg)
-    # elif args_optimizer == 'amsgrad':
-    #     optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
-    #     optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
-    # elif args_optimizer == 'sgd':
-    #     optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
-    #     optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
-    # else:
-    #     print("Optimizer not implemented.")
-    #
-    # scheduler = get_scheduler(optimizer_g, args)
+    if args_optimizer == 'adam':
+        optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
+        optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg)
+    elif args_optimizer == 'amsgrad':
+        optimizer_g = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg, amsgrad=True)
+        optimizer_d = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=lr, weight_decay=args.reg, amsgrad=True)
+    elif args_optimizer == 'sgd':
+        optimizer_g = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+        optimizer_d = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        print("Optimizer not implemented.")
 
-    # 加载optimizer
-    optimizer_g = optimizers_g[net_id]
-    # 加载scheduler
-    scheduler_g = schedulers_g[net_id]
+    scheduler_g = get_scheduler(optimizer_g, args)
+
+    # # 加载optimizer
+    # optimizer_g = optimizers_g[net_id]
+    # # 加载scheduler
+    # scheduler_g = schedulers_g[net_id]
 
     cnt = 0
     if type(train_dataloader) == type([1]):
@@ -699,12 +700,13 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
         epoch_task_loss = sum(epoch_task_loss_collector) / len(epoch_task_loss_collector)
         epoch_adv_loss = sum(epoch_adv_loss_collector) / len(epoch_adv_loss_collector)
-        epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+
 
         if args.l1:
+            epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
             logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f L1 norm: %f' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss, epoch_l1_loss))
         else:
-            logger.info('Epoch: %d Last Batch Total Loss: %f' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss))
+            logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f ' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss))
 
         if args.scheduler == 'ReduceLROnPlateau':
             scheduler_g.step(epoch)
@@ -734,7 +736,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     filename = f"adv_client{net_id}_round{round}.pth"
     save_checkpoint(checkpoint, './checkpoints', filename)
 
-    return train_acc, test_acc, G_output_list, checkpoint
+    return train_acc, test_acc, G_output_list
 
 
 
@@ -767,7 +769,7 @@ def train_net_fedavg(net_id, net, train_dataloader, test_dataloader, epochs, lr,
     #writer = SummaryWriter()
 
     if round % 2 != 0:
-        epochs = epochs - 2
+        epochs = epochs - 4
 
     for epoch in range(epochs):
         epoch_loss_collector = []
@@ -1222,28 +1224,30 @@ def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
 
 
 # 新增的判别器训练函数
-def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, optimizer_d, scheduler_d, lr, epochs=5, batch_size=64):
+def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args_optimizer, lr, epochs=5, batch_size=64):
     D.train()  # 确保判别器处于训练模式
     criterion = nn.BCELoss()  # 二元交叉熵损失
 
     # 根据优化器类型选择优化器
-    # if args_optimizer == 'adam':
-    #     optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg)
-    # elif args_optimizer == 'amsgrad':
-    #     optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg, amsgrad=True)
-    # elif args_optimizer == 'sgd':
-    #     optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
-    # else:
-    #     optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    if args_optimizer == 'adam':
+        optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg)
+    elif args_optimizer == 'amsgrad':
+        optimizer = optim.Adam(D.parameters(), lr=lr, weight_decay=args.reg, amsgrad=True)
+    elif args_optimizer == 'sgd':
+        optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    else:
+        optimizer = optim.SGD(D.parameters(), lr=lr, momentum=args.rho, weight_decay=args.reg)
 
     # print(optimizer)
-    optimizer = optimizer_d
-    scheduler = scheduler_d
+    # optimizer = optimizer_d
+    # scheduler = scheduler_d
     # 准备假数据和真实数据
     # client_tensors = split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map)
     # fake_data = torch.cat([tensor for _, tensor in client_tensors.items()], dim=0).to(device)  # 将假数据迁移到指定设备
     fake_data = G_output_list_all_clients.to(device)
     real_data = real_data.to(device)  # 将真实数据迁移到指定设备
+
+    scheduler = get_scheduler(optimizer, args)
 
     # 创建数据加载器，应用标签平滑
     fake_dataset = torch.utils.data.TensorDataset(fake_data, torch.full((len(fake_data),), 0.1).to(device))  # 假数据标签为0.1，并迁移到设备
@@ -1571,11 +1575,11 @@ def generate_real_samples(global_model, data_loader, device="cpu"):
     return real_samples
 
 
-def local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers, schedulers, optimizers_g, schedulers_g, adv=False, test_dl=None, device="cpu"):
+def local_train_net(nets, selected, args, net_dataidx_map, D, round, adv=False, test_dl=None, device="cpu"):
     avg_acc = 0.0
 
     G_output_list_all_clients = None
-    checkpoint_all_clients = {}
+    # checkpoint_all_clients = {}
     for net_id, net in nets.items():
         if net_id not in selected:
             continue
@@ -1598,12 +1602,12 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers,
         n_epoch = args.epochs
 
         if not adv:
-            trainacc, testacc, G_output_list, checkpoint = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, round, optimizers, schedulers, device=device)
+            trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, round, device=device)
         else:
-            trainacc, testacc, G_output_list, checkpoint = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, round, optimizers_g, schedulers_g, device=device)
+            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl, args.epoch_G, args.lr_G, args.optimizer_G, round, device=device)
 
         # 保存客户端的checkpoint
-        checkpoint_all_clients[checkpoint['client']] = checkpoint
+        # checkpoint_all_clients[checkpoint['client']] = checkpoint
 
         if G_output_list_all_clients is None:
             G_output_list_all_clients = G_output_list
@@ -1622,7 +1626,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers,
         logger.info("avg test acc %f" % avg_acc)
 
     nets_list = list(nets.values())
-    return nets_list, G_output_list_all_clients, checkpoint_all_clients
+    return nets_list, G_output_list_all_clients
 
 def local_train_net_fedavg(nets, selected, args, net_dataidx_map, round, test_dl = None, device="cpu"):
     avg_acc = 0.0
@@ -1961,23 +1965,23 @@ if __name__ == '__main__':
         global_model = global_models[0]
 
         # 断点继续：加载全局模型
-        global_state = initialize_global_state(global_model, D, args)
+        # global_state = initialize_global_state(global_model, D, args)
 
-        previous_round = 0
-        if args.resume:  # True
-            previous_round = load_global_model(global_state, os.path.join(args.ckpt_dir, 'global_model.pth'))+1
+        # previous_round = 0
+        # if args.resume:  # True
+        #     previous_round = load_global_model(global_state, os.path.join(args.ckpt_dir, 'global_model.pth'))+1
 
-        global_model = global_state['model']
-        D = global_state['D']
-        optimizer_d = global_state['optimizer_d']
-        scheduler_d = global_state['scheduler_d']
+        # global_model = global_state['model']
+        # D = global_state['D']
+        # optimizer_d = global_state['optimizer_d']
+        # scheduler_d = global_state['scheduler_d']
 
         global_para = global_model.state_dict()
         if args.is_same_initial:
             for net_id, net in nets.items():
                 net.load_state_dict(global_para)
 
-        for round in range(0 + previous_round, args.comm_round):
+        for round in range(args.comm_round):
             logger.info("in comm round:" + str(round))
 
             arr = np.arange(args.n_parties)
@@ -1996,22 +2000,22 @@ if __name__ == '__main__':
 
             # 给各客户端加载状态
             # 假设初始化客户端时的代码如下：
-            clients_state = initialize_clients_state(args.n_parties, nets)
+            # clients_state = initialize_clients_state(args.n_parties, nets)
 
             # 断点继续：加载客户端optimizer和scheduler
-            optimizers = {}
-            optimizers_g = {}
-            schedulers = {}
-            schedulers_g = {}
-            if args.resume:
-                load_client_states(clients_state, args.ckpt_dir)
+            # optimizers = {}
+            # optimizers_g = {}
+            # schedulers = {}
+            # schedulers_g = {}
+            # if args.resume:
+            #     load_client_states(clients_state, args.ckpt_dir)
 
-            for net_id, net in nets.items():
-                nets[net_id] = clients_state[net_id]['model']
-                optimizers[net_id] = clients_state[net_id]['optimizer']
-                optimizers_g[net_id] = clients_state[net_id]['optimizer_g']
-                schedulers[net_id] = schedulers[net_id]['scheduler']
-                schedulers_g[net_id] = schedulers_g[net_id]['scheduler_g']
+            # for net_id, net in nets.items():
+            #     nets[net_id] = clients_state[net_id]['model']
+            #     optimizers[net_id] = clients_state[net_id]['optimizer']
+            #     optimizers_g[net_id] = clients_state[net_id]['optimizer_g']
+            #     schedulers[net_id] = schedulers[net_id]['scheduler']
+            #     schedulers_g[net_id] = schedulers_g[net_id]['scheduler_g']
 
 
             # update_client_task_layers(global_model, nets)
@@ -2022,15 +2026,15 @@ if __name__ == '__main__':
             #     _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, adv = True, test_dl = test_dl_global, device=device)
             # # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
 
-            _, G_output_list_all_clients, checkpoint_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers, schedulers, adv = False, test_dl = test_dl_global, device=device)
+            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, round, adv = False, test_dl = test_dl_global, device=device)
 
             # 更新clients_state
-            for net_id, net in nets.items():
-                nets[net_id] = checkpoint_all_clients[net_id]['model']
-                optimizers[net_id] = checkpoint_all_clients[net_id]['optimizer']
-                optimizers_g[net_id] = checkpoint_all_clients[net_id]['optimizer_g']
-                schedulers[net_id] = checkpoint_all_clients[net_id]['scheduler']
-                schedulers_g[net_id] = checkpoint_all_clients[net_id]['scheduler_g']
+            # for net_id, net in nets.items():
+            #     nets[net_id] = checkpoint_all_clients[net_id]['model']
+            #     optimizers[net_id] = checkpoint_all_clients[net_id]['optimizer']
+            #     optimizers_g[net_id] = checkpoint_all_clients[net_id]['optimizer_g']
+            #     schedulers[net_id] = checkpoint_all_clients[net_id]['scheduler']
+            #     schedulers_g[net_id] = checkpoint_all_clients[net_id]['scheduler_g']
 
             # update global model
             total_data_points = sum([len(net_dataidx_map[r]) for r in selected])
@@ -2077,14 +2081,14 @@ if __name__ == '__main__':
 
             G_output_list_all_clients = get_feature_maps(nets, selected, args, net_dataidx_map, test_dl = test_dl_global, device=device)
 
-            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, optimizer_d, scheduler_d, args.lr_D, args.epoch_D,
+            train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map, device, args.optimizer_D, args.lr_D, args.epoch_D,
                                 batch_size=args.batch_size)
 
             # 对抗训练客户端
             # 将判别器的输出形成的loss发送到各client，让它们进行对抗训练
             # 这里首先进了local_train_net函数中，然后再分流到执行adv_train_net函数
             # local_train_net(nets, selected, args, net_dataidx_map, D, adv=True, test_dl=test_dl_global, device=device)
-            _, G_output_list_all_clients, checkpoint_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, round, optimizers, schedulers, adv=True, test_dl=test_dl_global, device=device)
+            _, G_output_list_all_clients = local_train_net(nets, selected, args, net_dataidx_map, D, round, adv=True, test_dl=test_dl_global, device=device)
 
             # 第二轮update global model
             total_data_points = sum([len(net_dataidx_map[r]) for r in selected])
@@ -2113,27 +2117,14 @@ if __name__ == '__main__':
             logger.info('>> Global Model Test accuracy: %f' % test_acc)
 
             # 保存global model
-            save_global_model(global_model, round, args.ckpt_dir, 'global_model.pth')
+            # Save the training state
+            checkpoint = {
+                'model': global_model,
+                'round': round
+            }
+            filename = f"global_round{round}.pth"
+            save_global_model(checkpoint, args.ckpt_dir, filename)
             # 保存clients状态
-            clients_state = {}
-            for net_id in range(len(nets)):
-                optimizer = get_optimizer(nets[net_id], args)
-                optimizer_g = get_optimizer_g(nets[net_id], args)
-                optimizer_d = get_optimizer_d(nets[net_id], args)
-                scheduler = get_scheduler(optimizer, args)
-                scheduler_g = get_scheduler_g(optimizer_g, args)
-                scheduler_d = get_scheduler_d(optimizer_d, args)
-                clients_state[net_id] = {
-                    'model': nets[net_id],
-                    'optimizer': optimizer,
-                    'optimizer_g': optimizer_g,
-                    'optimizer_d': optimizer_d,
-                    'scheduler': scheduler,
-                    'scheduler_g': scheduler_g,
-                    'scheduler_d': scheduler_d
-                }
-
-            save_client_states(clients_state, args)
 
     elif args.alg == 'fedavg':
         logger.info("Initializing nets")
