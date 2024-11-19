@@ -23,9 +23,60 @@ from vggmodel import *
 from resnetcifar import *
 
 
+# def get_args():
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--model', type=str, default='mlp', help='neural network used in training')
+#     parser.add_argument('--dataset', type=str, default='mnist', help='dataset used for training')
+#     parser.add_argument('--net_config', type=lambda x: list(map(int, x.split(', '))))
+#     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
+#     parser.add_argument('--batch-size', type=int, default=64, help='input batch size for training (default: 64)')
+#     parser.add_argument('--lr', type=float, default=0.01, help='learning rate (default: 0.01)')
+#     parser.add_argument('--lr_G', type=float, default=0.01, help='learning rate (default: 0.001)')
+#     parser.add_argument('--lr_D', type=float, default=0.01, help='learning rate (default: 0.005)')
+#     parser.add_argument('--epochs', type=int, default=5, help='number of local epochs')
+#     parser.add_argument('--epoch_G', type=int, default=5, help='number of local epochs')
+#     parser.add_argument('--epoch_D', type=int, default=5, help='number of local epochs')
+#     parser.add_argument('--n_parties', type=int, default=2, help='number of workers in a distributed cluster')
+#     parser.add_argument('--alg', type=str, default='fedavg',
+#                         help='fl algorithms: fedavg/fedprox/scaffold/fednova/moon')
+#     parser.add_argument('--training_type', type=str, default='local', help='local/adversarial')
+#     parser.add_argument('--use_projection_head', type=bool, default=False,
+#                         help='whether add an additional header to model or not (see MOON)')
+#     parser.add_argument('--out_dim', type=int, default=256, help='the output dimension for the projection layer')
+#     parser.add_argument('--loss', type=str, default='contrastive', help='for moon')
+#     parser.add_argument('--temperature', type=float, default=0.5, help='the temperature parameter for contrastive loss')
+#     parser.add_argument('--comm_round', type=int, default=50, help='number of maximum communication roun')
+#     parser.add_argument('--is_same_initial', type=int, default=1,
+#                         help='Whether initial all the models with the same parameters in fedavg')
+#     parser.add_argument('--init_seed', type=int, default=0, help="Random seed")
+#     parser.add_argument('--dropout_p', type=float, required=False, default=0.0, help="Dropout probability. Default=0.0")
+#     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
+#     parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
+#     parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
+#     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
+#     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
+#     parser.add_argument('--beta', type=float, default=0.5,
+#                         help='The parameter for the dirichlet distribution for data partitioning')
+#     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
+#     parser.add_argument('--log_file_name', type=str, default=None, help='The log file name')
+#     parser.add_argument('--optimizer', type=str, default='sgd', help='the optimizer')
+#     parser.add_argument('--optimizer_G', type=str, default='adam', help='the optimizer')
+#     parser.add_argument('--optimizer_D', type=str, default='sgd', help='the optimizer')
+#     parser.add_argument('--mu', type=float, default=0.001, help='the mu parameter for fedprox')
+#     parser.add_argument('--noise', type=float, default=0, help='how much noise we add to some party')
+#     parser.add_argument('--noise_type', type=str, default='level',
+#                         help='Different level of noise or different space of noise')
+#     parser.add_argument('--rho', type=float, default=0, help='Parameter controlling the momentum SGD')
+#     parser.add_argument('--sample', type=float, default=1, help='Sample ratio for each communication round')
+#     args = parser.parse_args()
+#     return args
+
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='mlp', help='neural network used in training')
+    parser.add_argument('--resume', type=bool, default=True, help='whether to resume training')
+    parser.add_argument('--ckpt_dir', type=str, default='./checkpoints', help='directory to save checkpoints')
     parser.add_argument('--dataset', type=str, default='mnist', help='dataset used for training')
     parser.add_argument('--net_config', type=lambda x: list(map(int, x.split(', '))))
     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
@@ -36,38 +87,57 @@ def get_args():
     parser.add_argument('--epochs', type=int, default=5, help='number of local epochs')
     parser.add_argument('--epoch_G', type=int, default=5, help='number of local epochs')
     parser.add_argument('--epoch_D', type=int, default=5, help='number of local epochs')
-    parser.add_argument('--n_parties', type=int, default=2, help='number of workers in a distributed cluster')
+    parser.add_argument('--n_parties', type=int, default=2,  help='number of workers in a distributed cluster')
     parser.add_argument('--alg', type=str, default='fedavg',
-                        help='fl algorithms: fedavg/fedprox/scaffold/fednova/moon')
+                            help='fl algorithms: fedavg/fedprox/scaffold/fednova/moon')
     parser.add_argument('--training_type', type=str, default='local', help='local/adversarial')
-    parser.add_argument('--use_projection_head', type=bool, default=False,
-                        help='whether add an additional header to model or not (see MOON)')
+    parser.add_argument('--use_projection_head', type=bool, default=False, help='whether add an additional header to model or not (see MOON)')
     parser.add_argument('--out_dim', type=int, default=256, help='the output dimension for the projection layer')
     parser.add_argument('--loss', type=str, default='contrastive', help='for moon')
     parser.add_argument('--temperature', type=float, default=0.5, help='the temperature parameter for contrastive loss')
     parser.add_argument('--comm_round', type=int, default=50, help='number of maximum communication roun')
-    parser.add_argument('--is_same_initial', type=int, default=1,
-                        help='Whether initial all the models with the same parameters in fedavg')
+    parser.add_argument('--is_same_initial', type=int, default=1, help='Whether initial all the models with the same parameters in fedavg')
     parser.add_argument('--init_seed', type=int, default=0, help="Random seed")
     parser.add_argument('--dropout_p', type=float, required=False, default=0.0, help="Dropout probability. Default=0.0")
     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
-    parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
+    parser.add_argument('--reg', type=float, default=1e-4, help="L2 regularization strength")
+    parser.add_argument('--l1_lambda', type=float, default=1e-4, help="L1 regularization strength")
+    parser.add_argument('--l1', type=bool, default=False, help="Use L1 regularization")
     parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
-    parser.add_argument('--beta', type=float, default=0.5,
-                        help='The parameter for the dirichlet distribution for data partitioning')
+    parser.add_argument('--beta', type=float, default=0.5, help='The parameter for the dirichlet distribution for data partitioning')
     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
     parser.add_argument('--log_file_name', type=str, default=None, help='The log file name')
     parser.add_argument('--optimizer', type=str, default='sgd', help='the optimizer')
-    parser.add_argument('--optimizer_G', type=str, default='adam', help='the optimizer')
-    parser.add_argument('--optimizer_D', type=str, default='sgd', help='the optimizer')
+    parser.add_argument('--optimizer_G', type=str, default='amsgrad', help='the optimizer')
+    parser.add_argument('--optimizer_D', type=str, default='amsgrad', help='the optimizer')
     parser.add_argument('--mu', type=float, default=0.001, help='the mu parameter for fedprox')
     parser.add_argument('--noise', type=float, default=0, help='how much noise we add to some party')
-    parser.add_argument('--noise_type', type=str, default='level',
-                        help='Different level of noise or different space of noise')
+    parser.add_argument('--noise_type', type=str, default='level', help='Different level of noise or different space of noise')
     parser.add_argument('--rho', type=float, default=0, help='Parameter controlling the momentum SGD')
     parser.add_argument('--sample', type=float, default=1, help='Sample ratio for each communication round')
+
+    # for scheduler
+    parser.add_argument('--scheduler', type=str, default='StepLR', help='Type of scheduler: StepLR, MultiStepLR, etc.')
+    parser.add_argument('--scheduler_g', type=str, default='StepLR', help='Type of scheduler: StepLR, MultiStepLR, etc.')
+    parser.add_argument('--scheduler_d', type=str, default='StepLR', help='Type of scheduler: StepLR, MultiStepLR, etc.')
+    parser.add_argument('--gamma', type=float, default=0.01, help='Decay rate for learning rate.')
+    parser.add_argument('--step_size', type=int, default=30, help='Step size for StepLR.')
+    parser.add_argument('--milestones', type=str, default='30,60',
+                        help='Milestones for MultiStepLR, separated by commas.')
+    parser.add_argument('--T_max', type=int, default=50, help='Maximum number of iterations for CosineAnnealingLR.')
+    parser.add_argument('--factor', type=float, default=0.1,
+                        help='Factor by which the learning rate will be reduced. ReduceLROnPlateau.')
+    parser.add_argument('--patience', type=int, default=10,
+                        help='Number of epochs with no improvement after which learning rate will be reduced. ReduceLROnPlateau.')
+    parser.add_argument('--base_lr', type=float, default=0.001, help='Initial learning rate for CyclicLR.')
+    parser.add_argument('--max_lr', type=float, default=0.01, help='Maximum learning rate for CyclicLR.')
+    parser.add_argument('--step_size_up', type=int, default=2000,
+                        help='Number of training iterations in the increasing half of a cycle. CyclicLR.')
+    parser.add_argument('--steps_per_epoch', type=int, default=1000,
+                        help='Number of steps per epoch, used for OneCycleLR.')
+
     args = parser.parse_args()
     return args
 
@@ -236,6 +306,16 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
 
     net.to('cpu')
     logger.info(' ** Training complete **')
+
+    # Save the training state
+    checkpoint = {
+        'client': net_id,
+        'model': net.state_dict(),  # Corrected key to 'model_state'
+        'round': round
+    }
+    filename = f"client{net_id}_round{round}.pth"
+    save_checkpoint(checkpoint, './checkpoints', filename)
+
     return train_acc, test_acc, G_output_list
 
 
@@ -352,6 +432,16 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
     net.to('cpu')
     logger.info(' ** Training complete **')
+
+    # 保存模型
+    # Save the training state
+    checkpoint = {
+        'client': net_id,
+        'model': net.state_dict(),  # Corrected key to 'model_state'
+        'round': round
+    }
+    filename = f"adv_client{net_id}_round{round}.pth"
+    save_checkpoint(checkpoint, './checkpoints', filename)
     return train_acc, test_acc, G_output_list
 
 
@@ -806,6 +896,27 @@ def hook_fn_reduce_feature_map(module, input, output):
     feature_map = reduced_output
 
 
+def save_global_model(global_model_checkpoint, directory, filename="global_model.pth"):
+    """
+    Save the global model state to a specified directory with a consistent filename format.
+    This also saves the round number for tracking the training progress.
+    """
+    os.makedirs(directory, exist_ok=True)
+    filepath = os.path.join(directory, filename)
+    torch.save(global_model_checkpoint, filepath)
+    print("Global model saved to {}".format(filepath))
+
+
+def save_checkpoint(state, checkpoint_dir, filename="checkpoint.pth.tar"):
+    """
+    Saves the training checkpoint to a specified directory with a given filename.
+    Ensures that the directory structure is consistent across various saving functions.
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure the directory exists.
+    filepath = os.path.join(checkpoint_dir, filename)
+    torch.save(state, filepath)
+    print("Checkpoint saved to {}".format(filepath))
+
 def split_G_output_by_clients(G_output_list_all_clients, net_dataidx_map):
     client_tensors = {}
     start_idx = 0
@@ -1100,7 +1211,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
             trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr,
                                                          args.optimizer, device=device)
         else:
-            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, test_dl_global, test_dl,
+            trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl,
                                                              args.epoch_G, args.lr_G, args.optimizer_G, device=device)
 
         if G_output_list_all_clients is None:
@@ -1599,6 +1710,15 @@ if __name__ == '__main__':
 
             logger.info('>> Global Model Train accuracy: %f' % train_acc)
             logger.info('>> Global Model Test accuracy: %f' % test_acc)
+
+            # 保存global model
+            # Save the training state
+            checkpoint = {
+                'model': global_model,
+                'round': round
+            }
+            filename = f"global_round{round}.pth"
+            save_global_model(checkpoint, args.ckpt_dir, filename)
 
     elif args.alg == 'fedavg':
         logger.info("Initializing nets")
