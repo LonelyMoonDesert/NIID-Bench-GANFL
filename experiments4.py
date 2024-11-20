@@ -266,6 +266,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
     G_output_list = None
     for epoch in range(epochs):
         epoch_loss_collector = []
+        epoch_l1_loss_collector = []
         for tmp in train_dataloader:
             for batch_idx, (x, target) in enumerate(tmp):
                 x, target = x.to(device), target.to(device)
@@ -286,15 +287,27 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_o
                         # Concatenate along the batch dimension
                         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
 
-                loss = criterion(out, target)
+                l1_norm = sum(p.abs().sum() for p in net.parameters())
+                if args.l1:
+                    loss = criterion(out, target) + 0.01 * args.l1_lambda * l1_norm
+                    # print("with l1 loss")
+                else:
+                    loss = criterion(out, target)
+                # loss = criterion(out, target)
                 loss.backward()
                 optimizer.step()
 
                 cnt += 1
                 epoch_loss_collector.append(loss.item())
+                if args.l1:
+                    epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
 
         epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-        logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+        if args.l1:
+            epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+            logger.info('Epoch: %d Loss: %f L1 loss: %f' % (epoch, epoch_loss, epoch_l1_loss))
+        else:
+            logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
 
     logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
 
@@ -369,6 +382,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         epoch_loss_collector = []
         epoch_task_loss_collector = []
         epoch_adv_loss_collector = []
+        epoch_l1_loss_collector = []
         for tmp in train_dataloader:
             for batch_idx, (x, target) in enumerate(tmp):
                 x = x.to(device)
@@ -407,7 +421,13 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 adv_loss = criterion_adv(D_out, real_labels)
 
                 # 计算总损失
-                loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
+                l1_norm = sum(p.abs().sum() for p in net.parameters())
+
+                # 计算总损失
+                if args.l1:
+                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss + 0.01 * args.l1_lambda * l1_norm
+                else:
+                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
                 # loss = 10 * adv_loss
                 loss.backward()
 
@@ -417,10 +437,24 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 epoch_loss_collector.append(loss.item())
                 epoch_task_loss_collector.append(task_loss.item())
                 epoch_adv_loss_collector.append(adv_loss.item())
+                if args.l1:
+                    epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
 
         # 记录每个epoch最后一个batch的损失
-        logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f' % (
-        epoch, epoch_loss_collector[-1], epoch_task_loss_collector[-1], epoch_adv_loss_collector[-1]))
+        # logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f' % (
+        # epoch, epoch_loss_collector[-1], epoch_task_loss_collector[-1], epoch_adv_loss_collector[-1]))
+
+        # 记录每个epoch最后一个batch的损失
+        epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+        epoch_task_loss = sum(epoch_task_loss_collector) / len(epoch_task_loss_collector)
+        epoch_adv_loss = sum(epoch_adv_loss_collector) / len(epoch_adv_loss_collector)
+
+
+        if args.l1:
+            epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+            logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f L1 norm: %f' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss, epoch_l1_loss))
+        else:
+            logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f ' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss))
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
