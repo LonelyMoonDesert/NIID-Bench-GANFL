@@ -151,13 +151,12 @@ class BasicBlock(nn.Module):
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        # 修改 inplace 为 False
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)  # 修改这里
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
-        # # 添加dropout 防止训练过拟合
-        # self.dropout = nn.Dropout(dropout_rate)
         self.downsample = downsample
         self.stride = stride
 
@@ -206,7 +205,7 @@ class Bottleneck(nn.Module):
         self.bn2 = norm_layer(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)  # 修改这里
         # 增加dropout层
         self.dropout = nn.Dropout(dropout_rate)
         self.downsample = downsample

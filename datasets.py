@@ -696,7 +696,8 @@ class FEMNIST(MNIST):
         else:
             data_file = self.test_file
 
-        self.data, self.targets, self.users_index = torch.load(os.path.join(self.processed_folder, data_file))
+        self.data, self.targets, self.users_index = torch.load(os.path.join(self.processed_folder, data_file),
+                                                               weights_only=True)
 
         if self.dataidxs is not None:
             self.data = self.data[self.dataidxs]

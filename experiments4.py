@@ -22,56 +22,6 @@ from utils import *
 from vggmodel import *
 from resnetcifar import *
 
-
-# def get_args():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--model', type=str, default='mlp', help='neural network used in training')
-#     parser.add_argument('--dataset', type=str, default='mnist', help='dataset used for training')
-#     parser.add_argument('--net_config', type=lambda x: list(map(int, x.split(', '))))
-#     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
-#     parser.add_argument('--batch-size', type=int, default=64, help='input batch size for training (default: 64)')
-#     parser.add_argument('--lr', type=float, default=0.01, help='learning rate (default: 0.01)')
-#     parser.add_argument('--lr_G', type=float, default=0.01, help='learning rate (default: 0.001)')
-#     parser.add_argument('--lr_D', type=float, default=0.01, help='learning rate (default: 0.005)')
-#     parser.add_argument('--epochs', type=int, default=5, help='number of local epochs')
-#     parser.add_argument('--epoch_G', type=int, default=5, help='number of local epochs')
-#     parser.add_argument('--epoch_D', type=int, default=5, help='number of local epochs')
-#     parser.add_argument('--n_parties', type=int, default=2, help='number of workers in a distributed cluster')
-#     parser.add_argument('--alg', type=str, default='fedavg',
-#                         help='fl algorithms: fedavg/fedprox/scaffold/fednova/moon')
-#     parser.add_argument('--training_type', type=str, default='local', help='local/adversarial')
-#     parser.add_argument('--use_projection_head', type=bool, default=False,
-#                         help='whether add an additional header to model or not (see MOON)')
-#     parser.add_argument('--out_dim', type=int, default=256, help='the output dimension for the projection layer')
-#     parser.add_argument('--loss', type=str, default='contrastive', help='for moon')
-#     parser.add_argument('--temperature', type=float, default=0.5, help='the temperature parameter for contrastive loss')
-#     parser.add_argument('--comm_round', type=int, default=50, help='number of maximum communication roun')
-#     parser.add_argument('--is_same_initial', type=int, default=1,
-#                         help='Whether initial all the models with the same parameters in fedavg')
-#     parser.add_argument('--init_seed', type=int, default=0, help="Random seed")
-#     parser.add_argument('--dropout_p', type=float, required=False, default=0.0, help="Dropout probability. Default=0.0")
-#     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
-#     parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
-#     parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
-#     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
-#     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
-#     parser.add_argument('--beta', type=float, default=0.5,
-#                         help='The parameter for the dirichlet distribution for data partitioning')
-#     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
-#     parser.add_argument('--log_file_name', type=str, default=None, help='The log file name')
-#     parser.add_argument('--optimizer', type=str, default='sgd', help='the optimizer')
-#     parser.add_argument('--optimizer_G', type=str, default='adam', help='the optimizer')
-#     parser.add_argument('--optimizer_D', type=str, default='sgd', help='the optimizer')
-#     parser.add_argument('--mu', type=float, default=0.001, help='the mu parameter for fedprox')
-#     parser.add_argument('--noise', type=float, default=0, help='how much noise we add to some party')
-#     parser.add_argument('--noise_type', type=str, default='level',
-#                         help='Different level of noise or different space of noise')
-#     parser.add_argument('--rho', type=float, default=0, help='Parameter controlling the momentum SGD')
-#     parser.add_argument('--sample', type=float, default=1, help='Sample ratio for each communication round')
-#     args = parser.parse_args()
-#     return args
-
-
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='mlp', help='neural network used in training')
@@ -103,7 +53,9 @@ def get_args():
     parser.add_argument('--reg', type=float, default=1e-4, help="L2 regularization strength")
     parser.add_argument('--l1_lambda', type=float, default=1e-4, help="L1 regularization strength")
     parser.add_argument('--l1', type=bool, default=False, help="Use L1 regularization")
-    parser.add_argument('--lambda_adv', type=float, default=0.5, help="adv_loss")
+    parser.add_argument('--adv_l1_lambda', type=float, default=1e-4, help="L1 regularization strength")
+    parser.add_argument('--adv_l1', type=bool, default=False, help="Use L1 regularization")
+    parser.add_argument('--lambda_adv', type=float, default=0.3, help="adv_loss")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
     parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
     parser.add_argument('--beta', type=float, default=0.5, help='The parameter for the dirichlet distribution for data partitioning')
@@ -197,29 +149,34 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                         output_size = 2
                         hidden_sizes = [16, 8]
                     net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
-                elif args.model == "vgg":
+                elif args.model == "vgg11":
                     net = vgg11()
                     hook_handle = net.features[20].register_forward_hook(hook_fn)
                 elif args.model == "simple-cnn":
                     if args.dataset in ("cifar10", "cinic10", "svhn"):
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=10)
-
+                        if args.dataset == "cifar10":
+                            hook_handle = net.conv2.register_forward_hook(hook_fn)
                     elif args.dataset in ("mnist", 'femnist', 'fmnist'):
                         net = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
                         hook_handle = net.conv2.register_forward_hook(hook_fn)
                     elif args.dataset == 'celeba':
                         net = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=2)
-                elif args.model == "vgg-9":
+                        hook_handle = net.conv2.register_forward_hook(hook_fn)
+                elif args.model == "vgg9":
                     if args.dataset in ("mnist", 'femnist'):
                         net = ModerateCNNMNIST()
+                        hook_handle = net.conv_layer[4].register_forward_hook(hook_fn)
                     elif args.dataset in ("cifar10", "cinic10", "svhn"):
                         # print("in moderate cnn")
                         net = ModerateCNN()
+                        hook_handle = net.conv_layer[4].register_forward_hook(hook_fn)
                     elif args.dataset == 'celeba':
                         net = ModerateCNN(output_dim=2)
-                elif args.model == "resnet":
+                        hook_handle = net.conv_layer[4].register_forward_hook(hook_fn)
+                elif args.model == "resnet50":
                     net = ResNet50_cifar10()
-                    hook_handle = net.layer3.register_forward_hook(hook_fn_reduce_feature_map)
+                    hook_handle = net.layer3.register_forward_hook(hook_fn_resnet50_cifar10)
                 elif args.model == "resnet18":
                     net = ResNet18_cifar10()
                     hook_handle = net.layer3.register_forward_hook(hook_fn_reduce_feature_map)
@@ -389,7 +346,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 target = target.to(device)
 
                 optimizer.zero_grad()
-                x.requires_grad = True
+                x.requires_grad = False
                 target.requires_grad = False
                 target = target.long().view(-1)
 
@@ -476,6 +433,104 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     }
     filename = f"adv_client{net_id}_round{round}.pth"
     save_checkpoint(checkpoint, './checkpoints', filename)
+    return train_acc, test_acc, G_output_list
+
+
+def train_net_fedgan(net_id, net, train_dataloader, test_dataloader, epochs, lr, args_optimizer, device="cpu"):
+    logger.info('Training network %s' % str(net_id))
+
+    train_acc = compute_accuracy(net, train_dataloader, device=device)
+    test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+
+    logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
+    logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
+
+    if args_optimizer == 'adam':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg)
+    elif args_optimizer == 'amsgrad':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=args.reg,
+                               amsgrad=True)
+    elif args_optimizer == 'sgd':
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho,
+                              weight_decay=args.reg)
+    criterion = nn.CrossEntropyLoss().to(device)
+
+    cnt = 0
+    if type(train_dataloader) == type([1]):
+        pass
+    else:
+        train_dataloader = [train_dataloader]
+
+    # writer = SummaryWriter()
+
+    G_output_list = None
+    for epoch in range(epochs):
+        epoch_loss_collector = []
+        epoch_l1_loss_collector = []
+        for tmp in train_dataloader:
+            for batch_idx, (x, target) in enumerate(tmp):
+                x, target = x.to(device), target.to(device)
+
+                optimizer.zero_grad()
+                x.requires_grad = True
+                target.requires_grad = False
+                target = target.long()
+
+                out = net(x)
+
+                # 在最后一个 epoch 记录下 G_output
+                if epoch == epochs - 1:
+                    # feature_map = feature_map.cpu()  # Ensure feature_map is on CPU
+                    if G_output_list is None:
+                        G_output_list = feature_map  # Initialize with the first feature map
+                    else:
+                        # Concatenate along the batch dimension
+                        G_output_list = torch.cat((G_output_list, feature_map), dim=0)
+
+                l1_norm = sum(p.abs().sum() for p in net.parameters())
+                if args.l1:
+                    loss = criterion(out, target) + 0.01 * args.l1_lambda * l1_norm
+                    # print("with l1 loss")
+                else:
+                    loss = criterion(out, target)
+
+                # loss = criterion(out, target)
+
+                loss.backward()
+                optimizer.step()
+
+                cnt += 1
+                epoch_loss_collector.append(loss.item())
+                if args.l1:
+                    epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
+
+        epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+        if args.l1:
+            epoch_l1_loss = sum(epoch_l1_loss_collector) / len(epoch_l1_loss_collector)
+            logger.info('Epoch: %d Loss: %f L1 loss: %f' % (epoch, epoch_loss, epoch_l1_loss))
+        else:
+            logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+
+    logger.info('Shape of G_output_list: {}'.format(G_output_list.shape if G_output_list is not None else 0))
+
+    train_acc = compute_accuracy(net, train_dataloader, device=device)
+    test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+
+    logger.info('>> Training accuracy: %f' % train_acc)
+    logger.info('>> Test accuracy: %f' % test_acc)
+
+    net.to('cpu')
+    logger.info(' ** Training complete **')
+
+    # Save the training state
+    checkpoint = {
+        'client': net_id,
+        'model': net.state_dict(),  # Corrected key to 'model_state'
+        'round': round
+    }
+    filename = f"client{net_id}_round{round}.pth"
+    save_checkpoint(checkpoint, './checkpoints', filename)
+
     return train_acc, test_acc, G_output_list
 
 
@@ -930,6 +985,24 @@ def hook_fn_reduce_feature_map(module, input, output):
     feature_map = reduced_output
 
 
+# 定义 hook 函数，resnet50-cifar10
+def hook_fn_resnet50_cifar10(module, input, output):
+    global feature_map
+    # 使用卷积降维，将通道数从 1024 降到 m，空间维度从 (8, 8) 到 (n, n)
+    m, n = 64, 4  # 可以根据需要调整 m 和 n 的值
+    # 卷积层用于减少通道数，这里将 in_channels 设置为 1024，匹配输入的通道数
+    conv = nn.Conv2d(in_channels=1024, out_channels=m, kernel_size=3, stride=2, padding=1).to(output.device)
+
+    # 先用卷积降维通道数
+    reduced_output = conv(output)
+
+    # 使用自适应平均池化调整空间维度为 (n, n)
+    reduced_output = nn.functional.adaptive_avg_pool2d(reduced_output, (n, n))
+
+    # 保存特征图
+    feature_map = reduced_output
+
+
 def save_global_model(global_model_checkpoint, directory, filename="global_model.pth"):
     """
     Save the global model state to a specified directory with a consistent filename format.
@@ -1015,8 +1088,12 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
 
             optimizer.zero_grad()
 
+            # print(targets_batch.shape)  # torch.Size([64])
+            # print(inputs_batch.shape) # torch.Size([64, 64, 14, 14])
             outputs = D(inputs_batch)
+            # print(outputs.shape)    # torch.Size([1024])
             outputs = outputs.squeeze()  # 确保outputs为 [batch_size] 形状
+
             fake_loss = criterion(outputs, targets_batch)
 
             # print('outputs: ', outputs)
@@ -1242,7 +1319,7 @@ def local_train_net(nets, selected, args, net_dataidx_map, D, adv=False, test_dl
         n_epoch = args.epochs
 
         if not adv:
-            trainacc, testacc, G_output_list = train_net(net_id, net, train_dl_local, test_dl, n_epoch, args.lr,
+            trainacc, testacc, G_output_list = train_net_fedgan(net_id, net, train_dl_local, test_dl, n_epoch, args.lr,
                                                          args.optimizer, device=device)
         else:
             trainacc, testacc, G_output_list = adv_train_net(net_id, net, D, args.lambda_adv, train_dl_local, test_dl,
@@ -1613,9 +1690,38 @@ if __name__ == '__main__':
 
     # 附加D
     # 创建判别器模型
-    D = DiscriminatorS()  # 输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+    # 附加D
+    # 创建判别器模型
+    if args.dataset == 'mnist':
+        if args.model == 'vgg9':
+            D = DiscriminatorS_vgg9_mnist()
+        elif args.model == 'simple-cnn':
+            D = DiscriminatorS_simplecnn_mnist()
+    elif args.dataset == 'cifar10':
+        if args.model == 'resnet18':
+            D = DiscriminatorS()  #              输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+        elif args.model == 'resnet50':
+            D = DiscriminatorS_resnet50_cifar10()
+        elif args.model == 'vgg11':
+            D = Discriminator_vgg11_cifar10()
+        elif args.model == 'simple-cnn':
+            D = DiscriminatorS_simplecnn_cifar10()  # 输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+        elif args.model == 'vgg9':
+            D = DiscriminatorS_vgg9_cifar10()
+    elif args.dataset == 'fmnist':
+        if args.model == 'simple-cnn':
+            D = DiscriminatorS_simplecnn_mnist()
+        elif args.model == 'vgg9':
+            D = DiscriminatorS_vgg9_mnist()
+    elif args.dataset == 'femnist':
+        if args.model == 'simple-cnn':
+            D = DiscriminatorS_simplecnn_mnist()
+        elif args.model == 'vgg9':
+            D = DiscriminatorS_simplecnn_mnist()
+
     D = D.to(device)
     print(D)
+
     # 初始化优化器和损失函数
     d_learning_rate = 0.01
     loss_d = nn.BCELoss()  # - [p * log(q) + (1-p) * log(1-q)]
@@ -1626,7 +1732,7 @@ if __name__ == '__main__':
         nets, local_model_meta_data, layer_type = init_nets(args.net_config, args.dropout_p, args.n_parties, args)
         global_models, global_model_meta_data, global_layer_type = init_nets(args.net_config, 0, 1, args)
         global_model = global_models[0]
-
+        print(nets[0])                                                                                                                                             
         global_para = global_model.state_dict()
         if args.is_same_initial:
             for net_id, net in nets.items():

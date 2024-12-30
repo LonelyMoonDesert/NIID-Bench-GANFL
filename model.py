@@ -602,7 +602,7 @@ class ModelFedCon(nn.Module):
             basemodel = ResNet50_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
-        elif base_model == "resnet18-cifar10(5clients)" or base_model == "resnet18":
+        elif base_model == "resnet18-cifar10" or base_model == "resnet18":
             basemodel = ResNet18_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
@@ -666,7 +666,7 @@ class ModelFedCon_noheader(nn.Module):
             basemodel = ResNet50_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
-        elif base_model == "resnet18-cifar10(5clients)":
+        elif base_model == "resnet18-cifar10":
             basemodel = ResNet18_cifar10()
             self.features = nn.Sequential(*list(basemodel.children())[:-1])
             num_ftrs = basemodel.fc.in_features
@@ -743,6 +743,7 @@ class ModelFedCon_noheader(nn.Module):
 
 import torch
 
+# for cifar10-resnet18
 class DiscriminatorS(nn.Module):
     def __init__(self, input_channels=64):
         super(DiscriminatorS, self).__init__()
@@ -769,9 +770,45 @@ class DiscriminatorS(nn.Module):
         return self.main(x).view(-1)
 
 
-class DiscriminatorS_mnist(nn.Module):
+# for cifar10-resnet50
+class DiscriminatorS_resnet50_cifar10(nn.Module):
+    def __init__(self):
+        super(DiscriminatorS_resnet50_cifar10, self).__init__()
+
+        self.main = nn.Sequential(
+            # First layer: Adjust input channels to 1024 (or any other size based on your previous network output)
+            nn.Conv2d(1024, 512, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # Second layer: Reduce channels from 512 to 256
+            nn.Conv2d(512, 256, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # Third layer: Reduce channels from 256 to 128
+            nn.Conv2d(256, 128, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # Fourth layer: Reduce channels from 128 to 64
+            nn.Conv2d(128, 64, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # Final layer: 64 -> 1 (output layer for binary classification)
+            nn.Conv2d(64, 1, kernel_size=(1, 1), stride=(1, 1)),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.main(x)
+
+
+# For mnist,fmnist simple-cnn
+class DiscriminatorS_simplecnn_mnist(nn.Module):
     def __init__(self, input_channels=16):  # Adjust the default number of input channels to 16
-        super(DiscriminatorS_mnist, self).__init__()
+        super(DiscriminatorS_simplecnn_mnist, self).__init__()
         self.main = nn.Sequential(
             # Input should have shape (input_channels, 8, 8) based on your error message
             nn.Conv2d(in_channels=input_channels, out_channels=128, kernel_size=4, stride=2, padding=1),  # Adjusted to output shape (128, 4, 4)
@@ -794,3 +831,109 @@ class DiscriminatorS_mnist(nn.Module):
     def forward(self, x):
         return self.main(x).view(-1)  # Flatten the output to a single dimension
 
+
+class DiscriminatorS_vgg9_mnist(nn.Module):
+    def __init__(self, input_channels=64):  # Default input channels to 64
+        super(DiscriminatorS_vgg9_mnist, self).__init__()
+        self.main = nn.Sequential(
+            # Conv layer 1: Input (64, 14, 14), Output (128, 7, 7)
+            nn.Conv2d(in_channels=input_channels, out_channels=128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Conv layer 2: Input (128, 7, 7), Output (256, 4, 4)
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Conv layer 3: Input (256, 4, 4), Output (128, 4, 4)
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Final Conv layer: Output (1, 4, 4) - Global average pooling will reduce it to (1)
+            nn.Conv2d(128, 1, kernel_size=4, stride=1, padding=0),  # Output shape (1, 1, 1)
+            nn.Sigmoid()  # Probability for each image
+        )
+
+    def forward(self, x):
+        # Apply the main layers and then flatten to a vector of size [batch_size]
+        x = self.main(x)
+        return x.view(-1)  # Flatten the output to shape [batch_size]
+
+
+# for cifar10-simplecnn
+class DiscriminatorS_simplecnn_cifar10(nn.Module):
+    def __init__(self):
+        super(DiscriminatorS_simplecnn_cifar10, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(16, 128, kernel_size=(4, 4), stride=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(256, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 1, kernel_size=(1, 1), stride=(1, 1)),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.main(x)
+        return x.view(-1)
+
+
+class Discriminator_vgg11_cifar10(nn.Module):
+    def __init__(self, input_channels=512):  # 修改为 512 通道
+        super(Discriminator_vgg11_cifar10, self).__init__()
+        self.main = nn.Sequential(
+            # 输入 (512, 1, 1)
+            nn.Conv2d(in_channels=input_channels, out_channels=128, kernel_size=1, stride=1, padding=0),  # 输出 (128, 1, 1)
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=1, stride=1, padding=0),  # 输出 (256, 1, 1)
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=1, stride=1, padding=0),  # 输出 (128, 1, 1)
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 保持输入与输出的一致性
+            nn.Conv2d(128, 1, kernel_size=1, stride=1, padding=0),  # 输出 (1, 1, 1)
+            nn.Sigmoid()  # 输出概率
+        )
+
+    def forward(self, x):
+        return self.main(x).view(-1)
+
+# vgg9 cifar10
+class DiscriminatorS_vgg9_cifar10(nn.Module):
+    def __init__(self):
+        super(DiscriminatorS_vgg9_cifar10, self).__init__()
+        self.main = nn.Sequential(
+            # Change the first Conv2d layer to accept 64 channels instead of 16
+            nn.Conv2d(64, 128, kernel_size=(4, 4), stride=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(128, 1, kernel_size=(1, 1), stride=(1, 1)),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.main(x)
+        return x.view(-1)
