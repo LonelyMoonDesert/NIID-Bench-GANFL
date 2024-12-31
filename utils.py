@@ -27,6 +27,9 @@ from config import params
 import sklearn.datasets as sk
 from sklearn.datasets import load_svmlight_file
 
+from torchvision.datasets.utils import download_url
+import zipfile
+
 logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -153,12 +156,52 @@ def load_cifar100_data(datadir):
     return (X_train, y_train, X_test, y_test)
 
 
-def load_tinyimagenet_data(datadir):
-    transform = transforms.Compose([transforms.ToTensor()])
-    xray_train_ds = ImageFolder_custom(datadir+'./train/', transform=transform)
-    xray_test_ds = ImageFolder_custom(datadir+'./val/', transform=transform)
+# def load_tinyimagenet_data(datadir):
+#     transform = transforms.Compose([transforms.ToTensor()])
+#     xray_train_ds = ImageFolder_custom(datadir+'./train/', transform=transform)
+#     xray_test_ds = ImageFolder_custom(datadir+'./val/', transform=transform)
+#
+#     X_train, y_train = np.array([s[0] for s in xray_train_ds.samples]), np.array([int(s[1]) for s in xray_train_ds.samples])
+#     X_test, y_test = np.array([s[0] for s in xray_test_ds.samples]), np.array([int(s[1]) for s in xray_test_ds.samples])
+#
+#     return (X_train, y_train, X_test, y_test)
 
-    X_train, y_train = np.array([s[0] for s in xray_train_ds.samples]), np.array([int(s[1]) for s in xray_train_ds.samples])
+def load_tinyimagenet_data(datadir):
+    # Path to the Tiny ImageNet dataset
+    tiny_imagenet_url = 'http://cs231n.stanford.edu/tiny-imagenet-200.zip'
+    dataset_dir = os.path.join(datadir, 'tiny-imagenet-200')
+
+    # Check if the Tiny ImageNet dataset already exists
+    if not os.path.exists(dataset_dir):
+        print("Tiny ImageNet not found. Downloading now...")
+
+        # Define the path where we will save the zip file
+        zip_path = os.path.join(datadir, 'tiny-imagenet-200.zip')
+
+        # Download the file
+        download_url(tiny_imagenet_url, root=datadir, filename='tiny-imagenet-200.zip', md5=None)
+
+        # Extract the dataset
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(datadir)
+
+        # Clean up by removing the zip file after extraction
+        os.remove(zip_path)
+
+    # Define the paths to train and validation data
+    train_dir = os.path.join(dataset_dir, 'train')
+    val_dir = os.path.join(dataset_dir, 'val')
+
+    # Define the transform for image data
+    transform = transforms.Compose([transforms.ToTensor()])
+
+    # Create custom dataset loaders
+    xray_train_ds = ImageFolder_custom(train_dir, transform=transform)
+    xray_test_ds = ImageFolder_custom(val_dir, transform=transform)
+
+    # Prepare training and testing data
+    X_train, y_train = np.array([s[0] for s in xray_train_ds.samples]), np.array(
+        [int(s[1]) for s in xray_train_ds.samples])
     X_test, y_test = np.array([s[0] for s in xray_test_ds.samples]), np.array([int(s[1]) for s in xray_test_ds.samples])
 
     return (X_train, y_train, X_test, y_test)
@@ -772,8 +815,8 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None, noise_lev
 
 
         if dataset == "tinyimagenet":
-            train_ds = dl_obj(datadir+'./train/', dataidxs=dataidxs, transform=transform_train)
-            test_ds = dl_obj(datadir+'./val/', transform=transform_test)
+            train_ds = dl_obj(datadir+'tiny-imagenet-200/train/', dataidxs=dataidxs, transform=transform_train)
+            test_ds = dl_obj(datadir+'tiny-imagenet-200/val/', transform=transform_test)
         else:
             train_ds = dl_obj(datadir, dataidxs=dataidxs, train=True, transform=transform_train, download=True)
             test_ds = dl_obj(datadir, train=False, transform=transform_test, download=True)
