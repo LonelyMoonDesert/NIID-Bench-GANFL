@@ -832,6 +832,82 @@ class DiscriminatorS_simplecnn_mnist(nn.Module):
         return self.main(x).view(-1)  # Flatten the output to a single dimension
 
 
+# For mlp,a9a/covtype
+class DiscriminatorS_mlp_a9a(nn.Module):
+    def __init__(self, input_channels=8):  # 输入的通道数为8
+        super(DiscriminatorS_mlp_a9a, self).__init__()
+
+        self.main = nn.Sequential(
+            # 输入为 [batch_size, 8, 1, 1]
+            nn.Conv2d(input_channels, 128, kernel_size=(2, 2), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=(2, 2), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=(1, 1), stride=(1, 1), padding=(0, 0)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            nn.Conv2d(128, 1, kernel_size=(1, 1), stride=(1, 1)),
+            nn.Sigmoid()  # Sigmoid输出 [0, 1]
+        )
+
+    def forward(self, x):
+        # print(f"Input shape: {x.shape}")  # 输入形状: torch.Size([64, 8]) 假设每个样本有8个特征
+
+        # 确保输入是4D张量，形状为 [batch_size, channels, height, width]
+        if len(x.shape) == 2:  # 输入是2D张量
+            x = x.view(x.size(0), 8, 1, 1)  # 转换为 [batch_size, 8, 1, 1] 其中8为通道数
+
+        x = self.main(x)
+
+        # print(f"Model output shape: {x.shape}")  # 模型输出形状: torch.Size([64, 1, 1, 1])
+
+        # 展平输出以匹配目标的形状 [batch_size, 1] -> [batch_size]
+        x = x.view(x.size(0), -1)  # 展平为 [batch_size, 1]
+
+        # print(f"Output shape: {x.shape}")  # 输出形状: torch.Size([64, 1])
+        return x
+
+
+# mlp, covtype
+class DiscriminatorS_mlp_covtype(nn.Module):
+    def __init__(self, input_channels=8, input_size=8):  # input_channels set to 8
+        super(DiscriminatorS_mlp_covtype, self).__init__()
+
+        self.main = nn.Sequential(
+            # Input: [batch_size, 8, 1, 1]
+            nn.Conv2d(input_channels, 128, kernel_size=(2, 2), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=(2, 2), stride=(2, 2), padding=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=(1, 1), stride=(1, 1), padding=(0, 0)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            nn.Conv2d(128, 1, kernel_size=(1, 1), stride=(1, 1)),
+            nn.Sigmoid()  # Output: [0, 1]
+        )
+
+    def forward(self, x):
+        # Ensure input is 4D tensor of shape [batch_size, channels, height, width]
+        if len(x.shape) == 2:  # If input is a 2D tensor (e.g., [batch_size, features])
+            x = x.view(x.size(0), 8, 1, 1)  # Reshape to [batch_size, 8, 1, 1] (8 channels)
+
+        x = self.main(x)
+
+        # Flatten the output to match target shape [batch_size, 1] -> [batch_size]
+        x = x.view(x.size(0), -1)
+        return x
+
+
 class DiscriminatorS_vgg9_mnist(nn.Module):
     def __init__(self, input_channels=64):  # Default input channels to 64
         super(DiscriminatorS_vgg9_mnist, self).__init__()

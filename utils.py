@@ -369,6 +369,10 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
                 # logger.info("sum pro1:", np.sum(proportions))
                 ## Balance
                 proportions = np.array([p * (len(idx_j) < N / n_parties) for p, idx_j in zip(proportions, idx_batch)])
+
+                proportions = np.nan_to_num(proportions, nan=0)  # 替换NaN为0
+                proportions[proportions == 0] = 1e-8  # 将零值替换为一个非常小的数
+
                 # logger.info("proportions2: ", proportions)
                 proportions = proportions / proportions.sum()
                 # logger.info("proportions3: ", proportions)

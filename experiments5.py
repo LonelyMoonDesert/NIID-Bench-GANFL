@@ -152,19 +152,24 @@ def init_nets(net_configs, dropout_p, n_parties, args):
                         input_size = 54
                         output_size = 2
                         hidden_sizes = [32, 16, 8]
+                        net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
+                        hook_handle = net.layers[2].register_forward_hook(hook_fn)
                     elif args.dataset == 'a9a':
                         input_size = 123
                         output_size = 2
                         hidden_sizes = [32, 16, 8]
+                        net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
+                        hook_handle = net.layers[2].register_forward_hook(hook_fn)
                     elif args.dataset == 'rcv1':
                         input_size = 47236
                         output_size = 2
                         hidden_sizes = [32, 16, 8]
+                        net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
+                        hook_handle = net.layers[2].register_forward_hook(hook_fn)
                     elif args.dataset == 'SUSY':
                         input_size = 18
                         output_size = 2
                         hidden_sizes = [16, 8]
-                    net = FcNet(input_size, hidden_sizes, output_size, dropout_p)
                 elif args.model == "vgg11":
                     net = vgg11()
                     hook_handle = net.features[20].register_forward_hook(hook_fn)
@@ -324,7 +329,8 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                   device="cpu"):
     logger.info('Starting adversarial training of clients...')
     criterion_task = nn.CrossEntropyLoss().to(device)
-    criterion_adv = nn.BCELoss().to(device)
+    # criterion_adv = nn.BCELoss().to(device)
+    criterion_adv = nn.BCEWithLogitsLoss().to(device)
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
@@ -336,13 +342,28 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
     # 获取生成器部分的参数（conv1 到 layer3 之前的所有层）
     generator_parameters = []
     G_output_list = None
-    for name, param in net.named_parameters():
-        if 'layer4' in name or 'avgpool' in name or 'fc' in name:
-            param.requires_grad = False
-        else:
-            generator_parameters.append(param)
 
+    # for mlp
+    if args.model == "mlp":
+        # 获取FcNet中的参数，选择layer0, layer1, layer2的参数
+        for name, param in net.named_parameters():
+            if 'layers.3' in name:  # 将layer3及以后的层设置为不更新
+                param.requires_grad = False
+                # print(name + " not updated.")
+            else:  # 将layer0, layer1, layer2的参数加入generator_parameters
+                generator_parameters.append(param)
+    else:
+        for name, param in net.named_parameters():
+            if 'layer4' in name or 'avgpool' in name or 'fc' in name:
+                param.requires_grad = False
+                # print(name+" added to parameters.")
+            else:
+                # print(name + " added to parameters.")
+                generator_parameters.append(param)
+
+    print(net.state_dict())
     optimizer = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
+    # print(generator_parameters)
 
     if args_optimizer == 'adam':
         optimizer = optim.Adam(generator_parameters, lr=lr, weight_decay=args.reg)
@@ -394,12 +415,18 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 D_out = D(feature_map).squeeze()
                 # print('D_out: {}'.format(D_out))
                 # print('fake_labels: {}'.format(fake_labels))
+                # epsilon = 1e-7
+                # D_out = D_out.clamp(min=epsilon, max=1 - epsilon)
 
                 # 计算任务损失和对抗损失
                 task_loss = criterion_task(out, target)
                 # adv_loss = criterion_adv(D_out, fake_labels)
                 adv_loss = criterion_adv(D_out, real_labels)
 
+                # print("out: ", out)
+                # print("target: ", target)
+                # print("D_out: ", D_out)
+                # print("real_labels: ", real_labels)
                 # 计算总损失
                 l1_norm = sum(p.abs().sum() for p in net.parameters())
 
@@ -454,6 +481,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         'model': net.state_dict(),  # Corrected key to 'model_state'
         'round': round
     }
+    print(net.state_dict())
     filename = f"adv_client{net_id}_round{round}.pth"
     save_checkpoint(checkpoint, './checkpoints', filename)
     return train_acc, test_acc, G_output_list
@@ -1112,9 +1140,9 @@ def train_discriminator(D, G_output_list_all_clients, real_data, net_dataidx_map
             optimizer.zero_grad()
 
             # print(targets_batch.shape)  # torch.Size([64])
-            # print(inputs_batch.shape) # torch.Size([64, 64, 14, 14])
+            # print(inputs_batch.shape) # torch.Size([64, 8])
             outputs = D(inputs_batch)
-            # print(outputs.shape)    # torch.Size([1024])
+            # print(outputs.shape)    # torch.Size([32])
             outputs = outputs.squeeze()  # 确保outputs为 [batch_size] 形状
 
             fake_loss = criterion(outputs, targets_batch)
@@ -1749,7 +1777,18 @@ if __name__ == '__main__':
     elif args.dataset == 'tinyimagenet':
         if args.model == 'resnet18':
             D = DiscriminatorS()  #              输入通道可以根据数据调整，例如灰度图使用 input_channels=1
-
+    elif args.dataset == 'a9a':
+        if args.model == 'mlp':
+            D = DiscriminatorS_mlp_a9a()
+    elif args.dataset == 'covtype':
+        if args.model == 'mlp':
+            D = DiscriminatorS_mlp_a9a()
+    elif args.dataset == 'rcv1':
+        if args.model == 'mlp':
+            D = DiscriminatorS_mlp_a9a()
+    elif args.dataset == 'SUSY':
+        if args.model == 'mlp':
+            D = DiscriminatorS_simplecnn_mnist()
 
     D = D.to(device)
     print(D)
@@ -1899,6 +1938,7 @@ if __name__ == '__main__':
         global_model = global_models[0]
 
         global_para = global_model.state_dict()
+        print(nets[0])
         if args.is_same_initial:
             for net_id, net in nets.items():
                 net.load_state_dict(global_para)
