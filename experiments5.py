@@ -133,7 +133,7 @@ def init_nets(net_configs, dropout_p, n_parties, args):
         else:
             for net_i in range(n_parties):
                 # For ImageNet dataset, choose from several popular pretrained models
-                if args.dataset == "imagenet":
+                if args.dataset in ("imagenet", "tinyimagenet"):
                     if args.model == "resnet18":
                         net = models.resnet18(pretrained=True)
                     elif args.model == "resnet50":
@@ -361,7 +361,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 # print(name + " added to parameters.")
                 generator_parameters.append(param)
 
-    print(net.state_dict())
+    # print(net.state_dict())
     optimizer = optim.SGD(generator_parameters, lr=lr, momentum=args.rho, weight_decay=args.reg)
     # print(generator_parameters)
 
@@ -379,6 +379,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         train_dataloader = [train_dataloader]
 
     # 训练循环
+    entropy_list = []
     for epoch in range(epochs):
         epoch_loss_collector = []
         epoch_task_loss_collector = []
@@ -396,11 +397,21 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
 
                 # 生成伪标签
                 # fake_labels = torch.zeros((x.shape[0]), 1).to(device).view(-1)
-                fake_labels = torch.full((x.shape[0],), 0.1, device=device)
-                real_labels = torch.full((x.shape[0],), 0.9, device=device)
+                # fake_labels = torch.full((x.shape[0],), 0.1, device=device)
+                # real_labels = torch.full((x.shape[0],), 0.9, device=device)
+                real_labels = torch.full((x.shape[0],), 0.85, device=device)
+                fake_labels = torch.full((x.shape[0],), 0.15, device=device)
 
                 # 前向传播，计算生成器输出
                 out = net(x)  # 通过模型的前半部分
+
+                # 捕获中间特征图
+                if epoch == epochs - 1:
+                    # 捕获中间特征图
+                    if feature_map is not None:
+                        entropy = compute_entropy(feature_map)
+                        entropy_list.append(entropy)
+
 
                 # 在最后一个 epoch 记录下 G_output
                 if epoch == epochs - 1:
@@ -431,10 +442,16 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 l1_norm = sum(p.abs().sum() for p in net.parameters())
 
                 # 计算总损失
-                if args.l1:
-                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss + 0.01 * args.l1_lambda * l1_norm
+                if args.model == "mlp":
+                    if args.l1:
+                        loss = task_loss + adv_loss + 0.01 * args.l1_lambda * l1_norm
+                    else:
+                        loss = task_loss + adv_loss
                 else:
-                    loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
+                    if args.l1:
+                        loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss + 0.01 * args.l1_lambda * l1_norm
+                    else:
+                        loss = (1 - lambda_adv) * task_loss + lambda_adv * adv_loss
                 # loss = 10 * adv_loss
                 loss.backward()
 
@@ -446,6 +463,9 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
                 epoch_adv_loss_collector.append(adv_loss.item())
                 if args.l1:
                     epoch_l1_loss_collector.append(0.01 * args.l1_lambda * l1_norm)
+                #
+                # # 在训练结束后计算并记录特征的熵
+                # logger.info('Post-training entropy of features: {}'.format(calculate_entropy(net(x))))
 
         # 记录每个epoch最后一个batch的损失
         # logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f' % (
@@ -462,6 +482,7 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
             logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f L1 norm: %f' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss, epoch_l1_loss))
         else:
             logger.info('Epoch: %d Last Batch Total Loss: %f Task Loss: %f Adversarial Loss: %f ' % (epoch, epoch_loss, epoch_task_loss, epoch_adv_loss))
+
 
     train_acc = compute_accuracy(net, train_dataloader, device=device)
     test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
@@ -481,9 +502,16 @@ def adv_train_net(net_id, net, D, lambda_adv, train_dataloader, test_dataloader,
         'model': net.state_dict(),  # Corrected key to 'model_state'
         'round': round
     }
-    print(net.state_dict())
+    # print(net.state_dict())
     filename = f"adv_client{net_id}_round{round}.pth"
     save_checkpoint(checkpoint, './checkpoints', filename)
+
+    # 记录这次的平均熵值
+    entropy_values = [e.item() for e in entropy_list]
+    # logger.info('>> Entropy list: {}'.format(entropy_values))
+    average_entropy = sum(entropy_values) / len(entropy_values)
+    logger.info('>> Average of entropy list: %f' % average_entropy)
+
     return train_acc, test_acc, G_output_list
 
 
@@ -515,6 +543,7 @@ def train_net_fedgan(net_id, net, train_dataloader, test_dataloader, epochs, lr,
     # writer = SummaryWriter()
 
     G_output_list = None
+    entropy_list = []
     for epoch in range(epochs):
         epoch_loss_collector = []
         epoch_l1_loss_collector = []
@@ -537,6 +566,11 @@ def train_net_fedgan(net_id, net, train_dataloader, test_dataloader, epochs, lr,
                     else:
                         # Concatenate along the batch dimension
                         G_output_list = torch.cat((G_output_list, feature_map), dim=0)
+
+                    # 捕获中间特征图
+                    if feature_map is not None:
+                        entropy = compute_entropy(feature_map)
+                        entropy_list.append(entropy)
 
                 l1_norm = sum(p.abs().sum() for p in net.parameters())
                 if args.l1:
@@ -581,6 +615,12 @@ def train_net_fedgan(net_id, net, train_dataloader, test_dataloader, epochs, lr,
     }
     filename = f"client{net_id}_round{round}.pth"
     save_checkpoint(checkpoint, './checkpoints', filename)
+
+    # 记录这次的平均熵值
+    entropy_values = [e.item() for e in entropy_list]
+    # logger.info('>> Entropy list: {}'.format(entropy_values))
+    average_entropy = sum(entropy_values) / len(entropy_values)
+    logger.info('>> Average of entropy list: %f' % average_entropy)
 
     return train_acc, test_acc, G_output_list
 
@@ -1053,6 +1093,25 @@ def hook_fn_resnet50_cifar10(module, input, output):
     # 保存特征图
     feature_map = reduced_output
 
+# # 辅助函数：计算特征的熵
+# def calculate_entropy(feature_map):
+#     # 对特征图进行 softmax 操作
+#     probabilities = F.softmax(feature_map, dim=1)  # softmax 在类的维度上
+#     log_probabilities = torch.log(probabilities + 1e-7)  # 防止 log(0) 的问题
+#     entropy = -torch.sum(probabilities * log_probabilities, dim=1)  # 对每个样本计算熵
+#     return entropy.mean().item()  # 返回熵的平均值
+
+# 计算熵的函数
+def compute_entropy(feature_map):
+    # 将特征图展平
+    flattened = feature_map.view(-1)
+
+    # 归一化成概率分布（softmax）
+    probs = F.softmax(flattened, dim=0)
+
+    # 计算熵
+    entropy = -torch.sum(probs * torch.log(probs + 1e-7))  # 加上一个小的epsilon避免log(0)
+    return entropy
 
 def save_global_model(global_model_checkpoint, directory, filename="global_model.pth"):
     """
@@ -1777,6 +1836,8 @@ if __name__ == '__main__':
     elif args.dataset == 'tinyimagenet':
         if args.model == 'resnet18':
             D = DiscriminatorS()  #              输入通道可以根据数据调整，例如灰度图使用 input_channels=1
+        elif args.model == 'simple-cnn':
+            D = DiscriminatorS()
     elif args.dataset == 'a9a':
         if args.model == 'mlp':
             D = DiscriminatorS_mlp_a9a()
